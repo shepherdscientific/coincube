@@ -1,0 +1,156 @@
+{
+  "project": "coincube",
+  "branchName": "feature/spark-integration",
+  "description": "Spark Protocol Integration - Add Spark Bitcoin L2 wallet as a self-custodial spending layer alongside the existing Liquid Wallet",
+  "agents": ["engineering-backend-architect", "engineering-frontend-developer"],
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Integrate Spark Wallet SDK into the Rust backend",
+      "description": "As a developer, I need to wire the Spark Wallet TypeScript SDK (or the Breez Rust SDK with Spark SSP support) into the coincubed daemon so that Spark wallet operations are available over the existing JSONRPC interface.",
+      "agents": ["engineering-backend-architect"],
+      "acceptanceCriteria": [
+        "Add spark-sdk dependency (TypeScript via Node bridge or Breez Rust SDK with Spark SSP) to Cargo.toml / package.json",
+        "Implement SparkWallet struct in coincube-core that wraps the SDK and exposes: create_wallet, get_balance, send, receive_address",
+        "Expose new JSONRPC methods on coincubed: spark_get_balance, spark_get_address, spark_send, spark_get_transactions",
+        "SparkWallet state is persisted to disk alongside existing wallet state",
+        "Unit tests pass for all new JSONRPC methods",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "Breez SDK already used for Liquid Wallet — evaluate whether the same Breez Rust SDK supports Spark SSPs to reuse the existing integration pattern"
+    },
+    {
+      "id": "US-002",
+      "title": "Spark Wallet onboarding — create or restore a Spark wallet",
+      "description": "As a user setting up COINCUBE for the first time, I want to create a new Spark wallet or restore one from a mnemonic so that I can start receiving and sending via Spark immediately after setup.",
+      "agents": ["engineering-frontend-developer"],
+      "acceptanceCriteria": [
+        "Installer wizard includes a new 'Spark Wallet' step after Vault setup",
+        "User can choose 'Create new Spark wallet' or 'Restore from mnemonic'",
+        "Generated mnemonic is displayed with a backup confirmation checkbox before proceeding",
+        "Restore flow validates the mnemonic and surfaces a clear error on invalid input",
+        "On success, navigates to the Spark Wallet home screen",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Spark Wallet home screen — balance and transaction history",
+      "description": "As a user, I want to see my Spark wallet balance and recent transaction history on a dedicated screen so that I can monitor my funds at a glance.",
+      "agents": ["engineering-frontend-developer"],
+      "acceptanceCriteria": [
+        "New 'Spark' tab appears in the main navigation alongside 'Vault' and 'Liquid'",
+        "Balance displayed in both BTC and the user's preferred fiat currency",
+        "Transaction list shows: direction (sent/received), amount, timestamp, and status (pending/confirmed)",
+        "Transactions are paginated or virtualized for performance with large history",
+        "Balance and transaction list auto-refresh every 30 seconds",
+        "Empty state shown with a call-to-action when no transactions exist",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Receive BTC via Spark — generate a Spark or Lightning address",
+      "description": "As a user, I want to generate a Spark address or Lightning invoice so that others can send me BTC instantly with no channel management on my end.",
+      "agents": ["engineering-frontend-developer"],
+      "acceptanceCriteria": [
+        "Receive screen accessible from the Spark tab via a 'Receive' button",
+        "User can choose between a Spark address (for Spark-to-Spark transfers) or a Lightning invoice (amount optional)",
+        "QR code rendered for the selected address/invoice",
+        "One-click copy button for address/invoice string",
+        "Lightning invoice expiry countdown displayed when amount is specified",
+        "Incoming payment triggers an in-app notification and refreshes the balance",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Send BTC via Spark — pay to a Spark address or Lightning invoice",
+      "description": "As a user, I want to send BTC to a Spark address or a Lightning invoice so that I can make instant, low-fee payments from my COINCUBE wallet.",
+      "agents": ["engineering-frontend-developer"],
+      "acceptanceCriteria": [
+        "Send screen accessible from the Spark tab via a 'Send' button",
+        "Input field auto-detects whether the pasted string is a Spark address or Lightning invoice (BOLT11)",
+        "Amount field pre-filled and locked when a Lightning invoice includes an amount",
+        "Fee estimate displayed before confirmation (Spark fees are near-zero; show '< 1 sat' if applicable)",
+        "Confirmation dialog summarises: recipient, amount, fee, and expected arrival time",
+        "Success screen shown with a transaction ID and 'View in history' link after send",
+        "Meaningful error messages on insufficient balance, invalid address, or network failure",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Move funds between Vault and Spark Wallet",
+      "description": "As a user, I want to move BTC between my Vault (on-chain) and my Spark Wallet so that I can top up my spending balance or sweep profits back to cold storage.",
+      "agents": ["engineering-frontend-developer", "engineering-backend-architect"],
+      "acceptanceCriteria": [
+        "'Move funds' action available from both the Vault screen and the Spark screen",
+        "User selects direction: Vault → Spark (deposit) or Spark → Vault (withdrawal)",
+        "On-chain fee estimate shown for Vault → Spark direction (Spark deposit requires on-chain tx)",
+        "Spark → Vault direction uses Spark's cooperative exit path; expected time shown",
+        "Confirmation step before any funds movement is initiated",
+        "Transaction appears in both Vault history and Spark history with a 'Transfer' label",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Cooperative exit (Spark → Vault) requires the Spark Service Provider to be online; surface a friendly error and fallback instructions if the SSP is unavailable"
+    },
+    {
+      "id": "US-007",
+      "title": "Spark Wallet settings — configure Spark Service Provider (SSP)",
+      "description": "As a power user, I want to choose or change my Spark Service Provider so that I can control which SSP manages my Spark interactions.",
+      "agents": ["engineering-frontend-developer"],
+      "acceptanceCriteria": [
+        "Settings screen includes a 'Spark' section with SSP URL input",
+        "Default SSP URL pre-populated (e.g. the Lightspark-hosted SSP)",
+        "Validation on save: ping the SSP endpoint and surface an error if unreachable",
+        "Change takes effect on next wallet load (not mid-session without restart warning)",
+        "Custom SSP URL persisted in app config file",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Spark stablecoin (BTKN) balance and transfers",
+      "description": "As a user, I want to see and send stablecoin balances (BTKN tokens) in my Spark Wallet so that I can hold and transact Bitcoin-native stablecoins without bridging.",
+      "agents": ["engineering-frontend-developer", "engineering-backend-architect"],
+      "acceptanceCriteria": [
+        "BTKN token balances displayed separately from BTC balance on the Spark home screen",
+        "Token name and symbol fetched from Spark metadata and displayed correctly",
+        "Send flow supports BTKN: token selector dropdown on send screen",
+        "Receive screen shows the same Spark address for both BTC and BTKN (address is token-agnostic)",
+        "Transaction history differentiates BTC and BTKN transfers with a token badge",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Scope to display and transfer only; minting/issuing tokens is out of scope for this feature branch"
+    }
+  ]
+}
