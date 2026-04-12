@@ -486,6 +486,50 @@ fn get_labels_bip329(control: &DaemonControl, params: Params) -> Result<serde_js
     Ok(serde_json::json!(control.get_labels_bip329(offset, limit)))
 }
 
+fn spark_create_wallet(
+    control: &DaemonControl,
+    params: Option<Params>,
+) -> Result<serde_json::Value, Error> {
+    let mnemonic = params
+        .as_ref()
+        .and_then(|p| p.get(0, "mnemonic"))
+        .map(|value| {
+            value
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| Error::invalid_params("Invalid 'mnemonic' parameter."))
+        })
+        .transpose()?;
+    Ok(serde_json::json!(control.spark_create_wallet(mnemonic)?))
+}
+
+fn spark_get_balance(control: &DaemonControl) -> Result<serde_json::Value, Error> {
+    Ok(serde_json::json!(control.spark_get_balance()?))
+}
+
+fn spark_get_address(control: &DaemonControl) -> Result<serde_json::Value, Error> {
+    Ok(serde_json::json!(control.spark_get_address()?))
+}
+
+fn spark_send(control: &DaemonControl, params: Params) -> Result<serde_json::Value, Error> {
+    let recipient = params
+        .get(0, "recipient")
+        .ok_or_else(|| Error::invalid_params("Missing 'recipient' parameter."))?
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| Error::invalid_params("Invalid 'recipient' parameter."))?;
+    let amount_sat = params
+        .get(1, "amount_sat")
+        .ok_or_else(|| Error::invalid_params("Missing 'amount_sat' parameter."))?
+        .as_u64()
+        .ok_or_else(|| Error::invalid_params("Invalid 'amount_sat' parameter."))?;
+    Ok(serde_json::json!(control.spark_send(recipient, amount_sat)?))
+}
+
+fn spark_get_transactions(control: &DaemonControl) -> Result<serde_json::Value, Error> {
+    Ok(serde_json::json!(control.spark_get_transactions()?))
+}
+
 /// Handle an incoming JSONRPC2 request.
 pub fn handle_request(control: &mut DaemonControl, req: Request) -> Result<Response, Error> {
     let result = match req.method.as_str() {
@@ -562,6 +606,18 @@ pub fn handle_request(control: &mut DaemonControl, req: Request) -> Result<Respo
             })?;
             list_transactions(control, params)?
         }
+        "spark_create_wallet" => spark_create_wallet(control, req.params)?,
+        "spark_get_balance" => spark_get_balance(control)?,
+        "spark_get_address" => spark_get_address(control)?,
+        "spark_send" => {
+            let params = req.params.ok_or_else(|| {
+                Error::invalid_params(
+                    "The 'spark_send' command requires 2 parameters: 'recipient' and 'amount_sat'",
+                )
+            })?;
+            spark_send(control, params)?
+        }
+        "spark_get_transactions" => spark_get_transactions(control)?,
         "startrescan" => {
             let params = req
                 .params
@@ -599,4 +655,94 @@ pub fn handle_request(control: &mut DaemonControl, req: Request) -> Result<Respo
     };
 
     Ok(Response::success(req.id, result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        jsonrpc::rpc::{Params, ReqId, Request},
+        testutils::{DummyBitcoind, DummyCoincube, DummyDatabase},
+    };
+
+    fn req(method: &str, params: Option<Params>) -> Request {
+        Request {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params,
+            id: ReqId::Num(1),
+        }
+    }
+
+    #[test]
+    fn spark_jsonrpc_methods_roundtrip() {
+        let mut ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        {
+            let control = ms.control_mut();
+
+            let created = handle_request(
+                control,
+                req(
+                    "spark_create_wallet",
+                    Some(Params::Map(
+                        [(
+                            "mnemonic".to_string(),
+                            serde_json::json!(
+                                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+                            ),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    )),
+                ),
+            )
+            .unwrap();
+            let created_json = serde_json::to_value(created).unwrap();
+            assert_eq!(created_json["result"]["wallet"]["network"], "bitcoin");
+
+            control
+                .spark_wallet()
+                .lock()
+                .unwrap()
+                .credit("spark:peer:rpc", 25_000)
+                .unwrap();
+
+            let balance = handle_request(control, req("spark_get_balance", None)).unwrap();
+            let balance_json = serde_json::to_value(balance).unwrap();
+            assert_eq!(balance_json["result"]["balance"]["sats"], 25_000);
+
+            let address = handle_request(control, req("spark_get_address", None)).unwrap();
+            let address_json = serde_json::to_value(address).unwrap();
+            assert!(address_json["result"]["address"]
+                .as_str()
+                .unwrap()
+                .starts_with("spark:bitcoin:"));
+
+            let send = handle_request(
+                control,
+                req(
+                    "spark_send",
+                    Some(Params::Array(vec![
+                        serde_json::json!("lnbc1rpcrecipient"),
+                        serde_json::json!(10_000_u64),
+                    ])),
+                ),
+            )
+            .unwrap();
+            let send_json = serde_json::to_value(send).unwrap();
+            assert_eq!(
+                send_json["result"]["transaction"]["amount_sat"],
+                serde_json::json!(10_000_u64)
+            );
+
+            let txs = handle_request(control, req("spark_get_transactions", None)).unwrap();
+            let txs_json = serde_json::to_value(txs).unwrap();
+            assert_eq!(
+                txs_json["result"]["transactions"].as_array().unwrap().len(),
+                2
+            );
+        }
+
+        ms.shutdown();
+    }
 }

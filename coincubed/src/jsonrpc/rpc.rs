@@ -164,10 +164,12 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::RbfError(..)
             | commands::CommandError::EmptyFilterList
             | commands::CommandError::RecoveryNotAvailable
-            | commands::CommandError::OutpointNotRecoverable(..) => {
+            | commands::CommandError::OutpointNotRecoverable(..)
+            | commands::CommandError::SparkWallet(..) => {
                 Error::new(ErrorCode::InvalidParams, e.to_string())
             }
-            commands::CommandError::RescanTrigger(..) => {
+            commands::CommandError::RescanTrigger(..)
+            | commands::CommandError::SparkWalletInternal(..) => {
                 Error::new(ErrorCode::InternalError, e.to_string())
             }
             commands::CommandError::TxBroadcast(_) => {

@@ -30,8 +30,8 @@ pub use message::Message;
 
 use state::{
     CoinsPanel, ConnectPanel, CreateSpendPanel, GlobalHome, LiquidOverview, LiquidReceive,
-    LiquidSend, LiquidSettings, LiquidTransactions, PsbtsPanel, State, VaultOverview,
-    VaultReceivePanel, VaultTransactionsPanel,
+    LiquidSend, LiquidSettings, LiquidTransactions, PsbtsPanel, SparkOverview, State,
+    VaultOverview, VaultReceivePanel, VaultTransactionsPanel,
 };
 use wallet::{sync_status, SyncStatus};
 
@@ -40,7 +40,7 @@ use crate::{
         breez::BreezClient,
         cache::{Cache, DaemonCache},
         error::Error,
-        menu::{MarketplaceSubMenu, Menu},
+        menu::{MarketplaceSubMenu, Menu, SparkSubMenu},
         message::FiatMessage,
         settings::WalletId,
         wallet::Wallet,
@@ -65,6 +65,7 @@ struct Panels {
     connect_expanded: bool,
     // Always available panels
     global_home: GlobalHome,
+    spark_overview: Option<SparkOverview>,
     liquid_overview: LiquidOverview,
     liquid_send: LiquidSend,
     liquid_receive: LiquidReceive,
@@ -119,6 +120,9 @@ impl Panels {
 
         let default_fiat_currency = Self::default_fiat_currency(datadir, network, &cube_id);
 
+        let has_spark =
+            settings::has_spark_wallet_state(&datadir.network_directory(network), &cube_id);
+
         Self {
             current: Menu::Home,
             vault_expanded: false,
@@ -143,6 +147,8 @@ impl Panels {
                     cube_id.clone(),
                 )
             },
+            spark_overview: has_spark
+                .then(|| SparkOverview::new(datadir.clone(), network, cube_id.clone())),
             liquid_overview: LiquidOverview::new(breez_client.clone()),
             liquid_send: LiquidSend::new(breez_client.clone()),
             liquid_receive: LiquidReceive::new(breez_client.clone()),
@@ -218,6 +224,8 @@ impl Panels {
                 .unwrap_or(true);
 
         let default_fiat_currency = Self::default_fiat_currency(&data_dir, cache.network, &cube_id);
+        let has_spark =
+            settings::has_spark_wallet_state(&data_dir.network_directory(cache.network), &cube_id);
 
         Self {
             current: Menu::Home,
@@ -233,6 +241,8 @@ impl Panels {
                 cache.network,
                 cube_id.clone(),
             ),
+            spark_overview: has_spark
+                .then(|| SparkOverview::new(data_dir.clone(), cache.network, cube_id.clone())),
             vault_overview: Some(VaultOverview::new(
                 wallet.clone(),
                 cache.coins(),
@@ -429,6 +439,9 @@ impl Panels {
     fn current(&self) -> Option<&dyn State> {
         match &self.current {
             Menu::Home => Some(&self.global_home),
+            Menu::Spark(SparkSubMenu::Overview) => {
+                self.spark_overview.as_ref().map(|v| v as &dyn State)
+            }
             Menu::Liquid(submenu) => match submenu {
                 crate::app::menu::LiquidSubMenu::Overview => Some(&self.liquid_overview),
                 crate::app::menu::LiquidSubMenu::Send => Some(&self.liquid_send),
@@ -476,6 +489,9 @@ impl Panels {
     fn current_mut(&mut self) -> Option<&mut dyn State> {
         match &self.current {
             Menu::Home => Some(&mut self.global_home),
+            Menu::Spark(SparkSubMenu::Overview) => {
+                self.spark_overview.as_mut().map(|v| v as &mut dyn State)
+            }
             Menu::Liquid(submenu) => match submenu {
                 crate::app::menu::LiquidSubMenu::Overview => Some(&mut self.liquid_overview),
                 crate::app::menu::LiquidSubMenu::Send => Some(&mut self.liquid_send),
@@ -669,6 +685,9 @@ impl App {
         } else {
             tracing::warn!("vault_overview not present in App::new despite vault being configured");
         }
+        if let Some(spark_overview) = panels.spark_overview.as_mut() {
+            tasks.push(spark_overview.reload(Some(daemon.clone()), Some(wallet.clone())));
+        }
         tasks.push(
             panels
                 .global_home
@@ -677,6 +696,7 @@ impl App {
         let cmd = Task::batch(tasks);
         let mut cache_with_vault = cache;
         cache_with_vault.has_vault = true;
+        cache_with_vault.has_spark = panels.spark_overview.is_some();
         cache_with_vault.has_p2p = panels.p2p.is_some();
         (
             Self {
@@ -723,6 +743,10 @@ impl App {
             network,
             datadir_path: datadir.clone(),
             has_vault: false,
+            has_spark: settings::has_spark_wallet_state(
+                &datadir.network_directory(network),
+                &cube_settings.id,
+            ),
             bitcoin_unit,
             cube_name: cube_settings.name.clone(),
             ..Default::default()
@@ -740,7 +764,15 @@ impl App {
         let mut cache = cache;
         cache.has_p2p = panels.p2p.is_some();
 
-        let cmd = panels.global_home.reload(None, None);
+        if panels.spark_overview.is_some() {
+            panels.current = Menu::Spark(SparkSubMenu::Overview);
+        }
+
+        let mut tasks = vec![panels.global_home.reload(None, None)];
+        if let Some(spark_overview) = panels.spark_overview.as_mut() {
+            tasks.push(spark_overview.reload(None, None));
+        }
+        let cmd = Task::batch(tasks);
 
         (
             Self {

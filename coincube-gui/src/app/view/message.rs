@@ -92,6 +92,7 @@ pub enum Message {
     ImportPsbt,
     OpenUrl(String),
     Home(HomeMessage),
+    SparkOverview(SparkOverviewMessage),
     LiquidOverview(LiquidOverviewMessage),
     LiquidReceive(LiquidReceiveMessage),
     VaultReceive(VaultReceiveMessage),
@@ -111,6 +112,17 @@ pub enum Message {
     P2P(P2PMessage),
     ToggleTheme,
     DismissReceivedCelebration,
+}
+
+#[derive(Debug, Clone)]
+pub enum SparkOverviewMessage {
+    RefreshRequested,
+    Loaded {
+        wallet_id: String,
+        balance: Amount,
+        transactions: Vec<coincube_core::spark_wallet::SparkTransaction>,
+    },
+    LoadFailed(String),
 }
 
 impl Close for Message {

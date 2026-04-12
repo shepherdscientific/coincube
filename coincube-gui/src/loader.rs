@@ -596,6 +596,10 @@ pub async fn load_application(
         connect_expanded: false,
         connect_authenticated: false,
         has_vault: true,
+        has_spark: crate::app::settings::has_spark_wallet_state(
+            &config.datadir_path.network_directory(config.info.network),
+            &config.cube_settings.id,
+        ),
         cube_name: config.cube_settings.name.clone(),
         has_p2p: false, // Set later by App::new based on mnemonic availability
         theme_mode: coincube_ui::theme::palette::ThemeMode::default(),

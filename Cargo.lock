@@ -1570,6 +1570,7 @@ dependencies = [
  "log",
  "miniscript",
  "serde",
+ "serde_json",
  "zeroize",
 ]
 

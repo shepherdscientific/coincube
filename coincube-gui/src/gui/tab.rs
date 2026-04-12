@@ -1045,6 +1045,10 @@ pub fn create_app_with_remote_backend(
             connect_expanded: false,
             connect_authenticated: false,
             has_vault: true,
+            has_spark: app::settings::has_spark_wallet_state(
+                &coincube_dir.network_directory(network),
+                &cube_settings.id,
+            ),
             cube_name: cube_settings.name.clone(),
             has_p2p: false, // Set later by App::new based on mnemonic availability
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),

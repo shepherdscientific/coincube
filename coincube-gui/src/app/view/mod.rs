@@ -6,6 +6,7 @@ pub mod global_home;
 pub mod liquid;
 pub mod p2p;
 pub mod settings;
+pub mod spark;
 
 pub mod vault;
 
@@ -157,6 +158,26 @@ pub fn sidebar<'a>(
     }
 
     menu_column = menu_column.push(home_button);
+
+    // Check if Liquid submenu is expanded from cache
+    if cache.has_spark {
+        use crate::app::menu::SparkSubMenu;
+
+        let spark_button = if matches!(menu, Menu::Spark(SparkSubMenu::Overview)) {
+            row!(
+                button::menu_active(Some(lightning_icon()), "Spark")
+                    .on_press(Message::Reload)
+                    .width(iced::Length::Fill),
+                menu_bar_highlight(),
+            )
+        } else {
+            row!(button::menu(Some(lightning_icon()), "Spark")
+                .on_press(Message::Menu(Menu::Spark(SparkSubMenu::Overview)))
+                .width(iced::Length::Fill),)
+        };
+
+        menu_column = menu_column.push(spark_button);
+    }
 
     // Check if Liquid submenu is expanded from cache
     let is_liquid_expanded = cache.liquid_expanded;

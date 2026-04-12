@@ -649,6 +649,15 @@ impl DummyCoincube {
         }
     }
 
+    pub fn control_mut(&mut self) -> &mut DaemonControl {
+        match self.handle {
+            DaemonHandle::Controller {
+                ref mut control, ..
+            } => control,
+            DaemonHandle::Server { .. } => unreachable!(),
+        }
+    }
+
     pub fn shutdown(self) {
         self.handle.stop().unwrap();
         fs::remove_dir_all(self.tmp_dir).unwrap();

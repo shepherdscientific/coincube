@@ -29,6 +29,7 @@ use crate::{
         DatabaseInterface,
     },
 };
+use coincube_core::spark_wallet::{SparkWallet, SparkWalletError};
 
 use std::{
     error, fmt, io, path,
@@ -108,6 +109,7 @@ pub enum StartupError {
     Bitcoind(BitcoindError),
     Electrum(ElectrumError),
     Esplora(EsploraError),
+    SparkWallet(SparkWalletError),
 }
 
 impl fmt::Display for StartupError {
@@ -146,6 +148,7 @@ impl fmt::Display for StartupError {
             Self::Bitcoind(e) => write!(f, "Error setting up bitcoind interface: '{}'.", e),
             Self::Electrum(e) => write!(f, "Error setting up Electrum interface: '{}'.", e),
             Self::Esplora(e) => write!(f, "Error setting up Esplora interface: '{}'.", e),
+            Self::SparkWallet(e) => write!(f, "Error setting up Spark wallet: '{}'.", e),
         }
     }
 }
@@ -167,6 +170,12 @@ impl From<SqliteDbError> for StartupError {
 impl From<BitcoindError> for StartupError {
     fn from(e: BitcoindError) -> Self {
         Self::Bitcoind(e)
+    }
+}
+
+impl From<SparkWalletError> for StartupError {
+    fn from(e: SparkWalletError) -> Self {
+        Self::SparkWallet(e)
     }
 }
 
@@ -395,6 +404,7 @@ pub struct DaemonControl {
     poller_sender: mpsc::SyncSender<poller::PollerMessage>,
     // FIXME: Should we require Sync on DatabaseInterface rather than using a Mutex?
     db: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
+    spark_wallet: sync::Arc<sync::Mutex<SparkWallet>>,
     secp: secp256k1::Secp256k1<secp256k1::VerifyOnly>,
 }
 
@@ -404,6 +414,7 @@ impl DaemonControl {
         bitcoin: sync::Arc<sync::Mutex<dyn BitcoinInterface>>,
         poller_sender: mpsc::SyncSender<poller::PollerMessage>,
         db: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
+        spark_wallet: sync::Arc<sync::Mutex<SparkWallet>>,
         secp: secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     ) -> DaemonControl {
         DaemonControl {
@@ -411,6 +422,7 @@ impl DaemonControl {
             bitcoin,
             poller_sender,
             db,
+            spark_wallet,
             secp,
         }
     }
@@ -419,6 +431,11 @@ impl DaemonControl {
     #[cfg(test)]
     pub fn db(&self) -> sync::Arc<sync::Mutex<dyn DatabaseInterface>> {
         self.db.clone()
+    }
+
+    #[cfg(test)]
+    pub fn spark_wallet(&self) -> sync::Arc<sync::Mutex<SparkWallet>> {
+        self.spark_wallet.clone()
     }
 }
 
@@ -513,6 +530,10 @@ impl DaemonHandle {
             (None, None) => Err(StartupError::MissingBitcoinBackendConfig)?,
         };
 
+        let spark_wallet = sync::Arc::new(sync::Mutex::new(SparkWallet::load(
+            data_dir.spark_wallet_state_path(),
+        )?));
+
         // Start the poller thread. Keep the thread handle to be able to check if it crashed. Store
         // an atomic to be able to stop it.
         let mut bitcoin_poller =
@@ -532,7 +553,8 @@ impl DaemonHandle {
 
         // Create the API the external world will use to talk to us, either directly through the Rust
         // structure or through the JSONRPC server we may setup below.
-        let control = DaemonControl::new(config, bit, poller_sender.clone(), db, secp);
+        let control =
+            DaemonControl::new(config, bit, poller_sender.clone(), db, spark_wallet, secp);
 
         if with_rpc_server {
             let rpcserver_shutdown = sync::Arc::from(sync::atomic::AtomicBool::from(false));

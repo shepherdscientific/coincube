@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use async_fd_lock::LockWrite;
 use coincube_core::descriptors::CoincubeDescriptor;
 use std::io::SeekFrom;
+use std::path::PathBuf;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncSeekExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,6 +28,17 @@ use crate::{
 use coincube_core::miniscript::bitcoin::Network;
 
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
+
+pub fn spark_wallet_state_path(network_dir: &NetworkDirectory, cube_id: &str) -> PathBuf {
+    network_dir
+        .path()
+        .join("data")
+        .join(format!("spark-wallet-{}.json", cube_id))
+}
+
+pub fn has_spark_wallet_state(network_dir: &NetworkDirectory, cube_id: &str) -> bool {
+    spark_wallet_state_path(network_dir, cube_id).exists()
+}
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Settings {

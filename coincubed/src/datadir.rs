@@ -44,4 +44,9 @@ impl DataDirectory {
         dir.push("coincubed_rpc");
         dir
     }
+    pub fn spark_wallet_state_path(&self) -> PathBuf {
+        let mut dir = self.0.clone();
+        dir.push("spark_wallet.json");
+        dir
+    }
 }

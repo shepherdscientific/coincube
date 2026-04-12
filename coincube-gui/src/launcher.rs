@@ -4,6 +4,7 @@ use iced::{
     Alignment, Length, Subscription, Task,
 };
 
+use coincube_core::spark_wallet::SparkWallet;
 use coincube_core::{bip39, miniscript::bitcoin::Network};
 use coincube_ui::{
     color,
@@ -38,6 +39,7 @@ use crate::{
     },
 };
 use coincube_core::signer::HotSigner;
+use rand::RngCore;
 
 const NETWORKS: [Network; 5] = [
     Network::Bitcoin,
@@ -56,6 +58,19 @@ pub enum State {
     },
     NoCube,
     RecoveryInput,
+    SparkSetup,
+}
+
+#[derive(Debug, Clone)]
+enum PendingLiquidWallet {
+    Generate,
+    Restore(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SparkSetupMode {
+    Create,
+    Restore,
 }
 
 fn bip39_suggestions(prefix: &str, limit: usize) -> Vec<String> {
@@ -107,11 +122,19 @@ pub struct Launcher {
     create_cube_pin_confirm: pin_input::PinInput,
     recover_liquid_wallet: bool,
     creating_cube: bool,
+    launch_after_create: bool,
     /// UUID pre-generated on the first creation attempt and reused on retries
     /// so that each logical cube has a stable client-side identifier.
     pending_cube_id: Option<uuid::Uuid>,
     recovery_words: [String; 12],
     recovery_active_index: Option<usize>,
+    pending_liquid_wallet: Option<PendingLiquidWallet>,
+    spark_mode: SparkSetupMode,
+    spark_generated_mnemonic: Option<String>,
+    spark_restore_words: [String; 12],
+    spark_restore_active_index: Option<usize>,
+    spark_backup_confirmed: bool,
+    create_flow_origin: Option<State>,
     developer_mode: bool,
     /// Connect account tier — controls how many Cubes can be created per network.
     account_tier: AccountTier,
@@ -174,9 +197,17 @@ impl Launcher {
                 create_cube_pin_confirm: pin_input::PinInput::new(),
                 recover_liquid_wallet: false,
                 creating_cube: false,
+                launch_after_create: false,
                 pending_cube_id: None,
                 recovery_words: Default::default(),
                 recovery_active_index: None,
+                pending_liquid_wallet: None,
+                spark_mode: SparkSetupMode::Create,
+                spark_generated_mnemonic: None,
+                spark_restore_words: Default::default(),
+                spark_restore_active_index: None,
+                spark_backup_confirmed: false,
+                create_flow_origin: None,
                 developer_mode,
                 account_tier: GlobalSettings::load_account_tier(&GlobalSettings::path(
                     &datadir_path,
@@ -231,6 +262,51 @@ impl Launcher {
         local_count + remote_count
     }
 
+    fn clear_create_flow(&mut self) {
+        self.create_cube_name = coincube_ui::component::form::Value::default();
+        self.create_cube_pin = pin_input::PinInput::new();
+        self.create_cube_pin_confirm = pin_input::PinInput::new();
+        self.recover_liquid_wallet = false;
+        self.pending_liquid_wallet = None;
+        self.spark_mode = SparkSetupMode::Create;
+        self.spark_generated_mnemonic = None;
+        self.spark_backup_confirmed = false;
+        self.launch_after_create = false;
+        self.pending_cube_id = None;
+        self.create_flow_origin = None;
+        for word in &mut self.recovery_words {
+            word.clear();
+            word.shrink_to_fit();
+        }
+        for word in &mut self.spark_restore_words {
+            word.clear();
+            word.shrink_to_fit();
+        }
+        self.recovery_active_index = None;
+        self.spark_restore_active_index = None;
+    }
+
+    fn generate_spark_mnemonic(&mut self) -> Result<(), String> {
+        let mut entropy = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut entropy);
+        let mnemonic = bip39::Mnemonic::from_entropy(&entropy)
+            .map_err(|e| format!("Failed to generate Spark mnemonic: {}", e))?;
+        self.spark_generated_mnemonic = Some(mnemonic.to_string());
+        self.spark_backup_confirmed = false;
+        Ok(())
+    }
+
+    fn enter_spark_setup(&mut self) -> Result<Task<Message>, String> {
+        self.error = None;
+        self.spark_mode = SparkSetupMode::Create;
+        self.spark_restore_active_index = None;
+        if self.spark_generated_mnemonic.is_none() {
+            self.generate_spark_mnemonic()?;
+        }
+        self.state = State::SparkSetup;
+        Ok(Task::none())
+    }
+
     pub fn stop(&mut self) {}
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -270,15 +346,7 @@ impl Launcher {
                 if let State::Cubes { create_cube, .. } = &mut self.state {
                     *create_cube = show;
                     if !show {
-                        self.create_cube_name = coincube_ui::component::form::Value::default();
-                        self.create_cube_pin = pin_input::PinInput::new();
-                        self.create_cube_pin_confirm = pin_input::PinInput::new();
-                        // Clear recovery words when exiting create cube flow
-                        for word in &mut self.recovery_words {
-                            word.clear();
-                            word.shrink_to_fit();
-                        }
-                        self.recovery_active_index = None;
+                        self.clear_create_flow();
                     }
                 }
                 Task::none()
@@ -339,83 +407,24 @@ impl Launcher {
                     self.error = Some("PIN codes do not match".to_string());
                     return Task::none();
                 }
-
-                self.creating_cube = true;
-                let network = self.network;
-                let cube_name = self.create_cube_name.value.trim().to_string();
-                let pin = self.create_cube_pin.value();
-                let datadir_path = self.datadir_path.clone();
-
-                // Pre-generate the UUID before the async task so that retries
-                // reuse the same identifier (idempotent creation).
-                let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
-
-                let without_recovery = Task::perform(
-                    async move {
-                        // Generate Liquid wallet HotSigner
-                        let liquid_signer = HotSigner::generate(network).map_err(|e| {
-                            format!("Failed to generate Liquid wallet signer: {}", e)
-                        })?;
-
-                        // Create secp context for fingerprint calculation
-                        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
-                        let liquid_fingerprint = liquid_signer.fingerprint(&secp);
-
-                        // Store Liquid wallet mnemonic (encrypted with PIN if provided)
-                        let network_dir = datadir_path.network_directory(network);
-                        network_dir
-                            .init()
-                            .map_err(|e| format!("Failed to create network directory: {}", e))?;
-
-                        // Use a timestamp for the Liquid wallet storage
-                        let timestamp = chrono::Utc::now().timestamp();
-                        let liquid_checksum = format!("liquid_{}", timestamp);
-
-                        // Store Liquid wallet mnemonic encrypted with PIN (always required)
-                        liquid_signer
-                            .store_encrypted(
-                                datadir_path.path(),
-                                network,
-                                &secp,
-                                Some((liquid_checksum, timestamp)),
-                                Some(&pin),
-                            )
-                            .map_err(|e| {
-                                format!("Failed to store Liquid wallet mnemonic: {}", e)
-                            })?;
-
-                        tracing::info!("Liquid wallet signer created and stored (encrypted with PIN) with fingerprint: {}", liquid_fingerprint);
-
-                        // Build Cube settings using the pre-generated, stable UUID.
-                        let cube = CubeSettings::new_with_id(cube_id, cube_name, network)
-                            .with_liquid_signer(liquid_fingerprint)
-                            .with_pin(&pin)
-                            .map_err(|e| format!("Failed to hash PIN: {}", e))?;
-
-                        // Save Cube settings to settings file.
-                        // Idempotency: if a cube with this UUID was already persisted
-                        // (e.g. a previous attempt succeeded but the message was lost),
-                        // skip the insert and return the existing entry.
-                        settings::update_settings_file(&network_dir, |mut settings| {
-                            if settings.cubes.iter().any(|c| c.id == cube.id) {
-                                return Some(settings);
-                            }
-                            settings.cubes.push(cube.clone());
-                            Some(settings)
-                        })
-                        .await
-                        .map(|_| cube)
-                        .map_err(|e| e.to_string())
-                    },
-                    Message::CubeCreated,
-                );
+                if self.create_flow_origin.is_none() {
+                    self.create_flow_origin = Some(self.state.clone());
+                }
+                self.pending_liquid_wallet = Some(PendingLiquidWallet::Generate);
+                self.launch_after_create = true;
 
                 if self.recover_liquid_wallet {
-                    // Enter recovery flow - show recovery input UI
-                    self.creating_cube = false;
-                    Task::done(Message::StartRecovery)
+                    self.state = State::RecoveryInput;
+                    self.recovery_active_index = None;
+                    Task::none()
                 } else {
-                    without_recovery
+                    match self.enter_spark_setup() {
+                        Ok(task) => task,
+                        Err(e) => {
+                            self.error = Some(e);
+                            Task::none()
+                        }
+                    }
                 }
             }
             Message::StartRecovery => {
@@ -427,21 +436,9 @@ impl Launcher {
                 self.creating_cube = false;
                 match res {
                     Ok(cube) => {
-                        // UUID was consumed successfully — reset it so the next
-                        // cube creation starts with a fresh identifier.
-                        self.pending_cube_id = None;
-                        // Clear any previous error state
                         self.error = None;
-                        // Reset form fields
-                        self.create_cube_name = coincube_ui::component::form::Value::default();
-                        self.create_cube_pin = pin_input::PinInput::new();
-                        self.create_cube_pin_confirm = pin_input::PinInput::new();
-                        // Explicitly clear recovery words to prevent mnemonic from lingering in memory
-                        for word in &mut self.recovery_words {
-                            word.clear();
-                            word.shrink_to_fit();
-                        }
-                        self.recovery_active_index = None;
+                        let launch_after_create = self.launch_after_create;
+                        self.clear_create_flow();
                         let reload_task = self.reload();
 
                         // If logged in, register the new cube with the Connect API
@@ -463,19 +460,67 @@ impl Launcher {
                                     result,
                                 },
                             );
-                            Task::batch([reload_task, register_task])
+                            if launch_after_create {
+                                let mut path = self
+                                    .datadir_path
+                                    .network_directory(cube.network)
+                                    .path()
+                                    .to_path_buf();
+                                path.push(app::config::DEFAULT_FILE_NAME);
+                                match app::Config::from_file(&path) {
+                                    Ok(cfg) => Task::batch([
+                                        reload_task,
+                                        register_task,
+                                        Task::done(Message::Run(
+                                            self.datadir_path.clone(),
+                                            cfg,
+                                            cube.network,
+                                            cube,
+                                        )),
+                                    ]),
+                                    Err(e) => {
+                                        self.error = Some(format!(
+                                            "Cube created but could not open Spark Wallet: {}",
+                                            e
+                                        ));
+                                        Task::batch([reload_task, register_task])
+                                    }
+                                }
+                            } else {
+                                Task::batch([reload_task, register_task])
+                            }
                         } else {
-                            reload_task
+                            if launch_after_create {
+                                let mut path = self
+                                    .datadir_path
+                                    .network_directory(cube.network)
+                                    .path()
+                                    .to_path_buf();
+                                path.push(app::config::DEFAULT_FILE_NAME);
+                                match app::Config::from_file(&path) {
+                                    Ok(cfg) => Task::batch([
+                                        reload_task,
+                                        Task::done(Message::Run(
+                                            self.datadir_path.clone(),
+                                            cfg,
+                                            cube.network,
+                                            cube,
+                                        )),
+                                    ]),
+                                    Err(e) => {
+                                        self.error = Some(format!(
+                                            "Cube created but could not open Spark Wallet: {}",
+                                            e
+                                        ));
+                                        reload_task
+                                    }
+                                }
+                            } else {
+                                reload_task
+                            }
                         }
                     }
                     Err(e) => {
-                        // Retain pending_cube_id so a retry reuses the same UUID.
-                        // Clear recovery words on error too
-                        for word in &mut self.recovery_words {
-                            word.clear();
-                            word.shrink_to_fit();
-                        }
-                        self.recovery_active_index = None;
                         self.error = Some(format!("Failed to create Cube: {}", e));
                         Task::none()
                     }
@@ -918,106 +963,18 @@ impl Launcher {
                 match bip39::Mnemonic::parse_in(bip39::Language::English, words) {
                     Ok(mnemonic) => {
                         log::info!("Mnemonic parsed successfully");
-
-                        if self.creating_cube {
-                            return Task::none();
+                        self.pending_liquid_wallet =
+                            Some(PendingLiquidWallet::Restore(mnemonic.to_string()));
+                        match self.enter_spark_setup() {
+                            Ok(task) => task,
+                            Err(e) => {
+                                self.error = Some(e);
+                                Task::none()
+                            }
                         }
-
-                        if self.create_cube_name.value.trim().is_empty() {
-                            return Task::none();
-                        }
-
-                        // Validate PIN (always required)
-                        if !self.create_cube_pin.is_complete() {
-                            self.error = Some("Please enter all 4 PIN digits".to_string());
-                            return Task::none();
-                        }
-                        if !self.create_cube_pin_confirm.is_complete() {
-                            self.error = Some("Please confirm all 4 PIN digits".to_string());
-                            return Task::none();
-                        }
-                        if self.create_cube_pin.value() != self.create_cube_pin_confirm.value() {
-                            self.error = Some("PIN codes do not match".to_string());
-                            return Task::none();
-                        }
-
-                        self.creating_cube = true;
-                        let network = self.network;
-                        let cube_name = self.create_cube_name.value.trim().to_string();
-                        let pin = self.create_cube_pin.value();
-                        let datadir_path = self.datadir_path.clone();
-                        // Reuse the UUID that was pre-generated when the user
-                        // first clicked "Create Cube" (recovery path).
-                        let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
-
-                        Task::perform(
-                            async move {
-                                // Restore Liquid wallet HotSigner from mnemonic
-                                let liquid_signer = HotSigner::from_mnemonic(network, mnemonic)
-                                    .map_err(|e| {
-                                        format!("Failed to restore from mnemonic: {}", e)
-                                    })?;
-
-                                // Create secp context for fingerprint calculation
-                                let secp =
-                                    coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
-                                let liquid_fingerprint = liquid_signer.fingerprint(&secp);
-
-                                // Store Liquid wallet mnemonic (encrypted with PIN if provided)
-                                let network_dir = datadir_path.network_directory(network);
-                                network_dir.init().map_err(|e| {
-                                    format!("Failed to create network directory: {}", e)
-                                })?;
-
-                                // Use a timestamp for the Liquid wallet storage
-                                let timestamp = chrono::Utc::now().timestamp();
-                                let liquid_checksum = format!("liquid_{}", timestamp);
-
-                                // Store Liquid wallet mnemonic encrypted with PIN (always required)
-                                liquid_signer
-                                    .store_encrypted(
-                                        datadir_path.path(),
-                                        network,
-                                        &secp,
-                                        Some((liquid_checksum, timestamp)),
-                                        Some(&pin),
-                                    )
-                                    .map_err(|e| {
-                                        format!("Failed to store Liquid wallet mnemonic: {}", e)
-                                    })?;
-
-                                tracing::info!("Liquid wallet signer created and stored (encrypted with PIN) with fingerprint: {}", liquid_fingerprint);
-
-                                // Build Cube settings using the pre-generated, stable UUID.
-                                let cube = CubeSettings::new_with_id(cube_id, cube_name, network)
-                                    .with_liquid_signer(liquid_fingerprint)
-                                    .with_pin(&pin)
-                                    .map_err(|e| format!("Failed to hash PIN: {}", e))?;
-
-                                // Save Cube settings to settings file.
-                                // Idempotency: skip insert if UUID already exists.
-                                settings::update_settings_file(&network_dir, |mut settings| {
-                                    if settings.cubes.iter().any(|c| c.id == cube.id) {
-                                        return Some(settings);
-                                    }
-                                    settings.cubes.push(cube.clone());
-                                    Some(settings)
-                                })
-                                .await
-                                .map(|_| cube)
-                                .map_err(|e| e.to_string())
-                            },
-                            Message::CubeCreated,
-                        )
                     }
                     Err(error) => {
-                        // Clear recovery words on error
-                        for word in &mut self.recovery_words {
-                            word.clear();
-                            word.shrink_to_fit();
-                        }
-                        self.recovery_active_index = None;
-                        self.error = Some(error.to_string());
+                        self.error = Some(format!("Invalid recovery phrase: {}", error));
                         Task::none()
                     }
                 }
@@ -1028,11 +985,192 @@ impl Launcher {
                     word.shrink_to_fit();
                 }
                 self.recovery_active_index = None;
-                self.create_cube_name = coincube_ui::component::form::Value::default();
-                self.create_cube_pin = pin_input::PinInput::new();
-                self.create_cube_pin_confirm = pin_input::PinInput::new();
                 self.error = None;
-                self.reload()
+                self.pending_liquid_wallet = Some(PendingLiquidWallet::Generate);
+                if let Some(origin) = self.create_flow_origin.clone() {
+                    self.state = origin;
+                    Task::none()
+                } else {
+                    self.reload()
+                }
+            }
+            Message::View(ViewMessage::SelectSparkMode(mode)) => {
+                self.spark_mode = mode;
+                self.error = None;
+                if mode == SparkSetupMode::Create && self.spark_generated_mnemonic.is_none() {
+                    if let Err(e) = self.generate_spark_mnemonic() {
+                        self.error = Some(e);
+                    }
+                }
+                Task::none()
+            }
+            Message::View(ViewMessage::ToggleSparkBackupConfirmed(confirmed)) => {
+                self.spark_backup_confirmed = confirmed;
+                Task::none()
+            }
+            Message::View(ViewMessage::SparkWordInput { index, word }) => {
+                if index < 12 {
+                    let normalized = word
+                        .chars()
+                        .filter(|c| c.is_ascii_alphabetic())
+                        .collect::<String>()
+                        .to_lowercase();
+
+                    let mut valid_prefix = String::new();
+                    for ch in normalized.chars() {
+                        let mut next = valid_prefix.clone();
+                        next.push(ch);
+                        if bip39_suggestions(&next, 1).is_empty() {
+                            break;
+                        }
+                        valid_prefix = next;
+                    }
+
+                    self.spark_restore_words[index] = valid_prefix.clone();
+                    self.spark_restore_active_index = if valid_prefix.is_empty() {
+                        None
+                    } else {
+                        Some(index)
+                    };
+                    self.error = None;
+                }
+                Task::none()
+            }
+            Message::View(ViewMessage::SelectSparkSuggestion { index, word }) => {
+                if index < 12 {
+                    self.spark_restore_words[index] = word;
+                    self.spark_restore_active_index = None;
+                    self.error = None;
+                }
+                Task::none()
+            }
+            Message::View(ViewMessage::BackFromSparkSetup) => {
+                self.error = None;
+                if let Some(origin) = self.create_flow_origin.clone() {
+                    self.state = origin;
+                } else {
+                    self.state = State::NoCube;
+                }
+                Task::none()
+            }
+            Message::View(ViewMessage::SubmitSparkSetup) => {
+                if self.creating_cube {
+                    return Task::none();
+                }
+
+                let Some(liquid_setup) = self.pending_liquid_wallet.clone() else {
+                    self.error = Some("Complete the Liquid wallet setup before Spark.".to_string());
+                    return Task::none();
+                };
+
+                let spark_mnemonic = match self.spark_mode {
+                    SparkSetupMode::Create => {
+                        if !self.spark_backup_confirmed {
+                            self.error = Some(
+                                "Confirm that you backed up the Spark recovery phrase.".to_string(),
+                            );
+                            return Task::none();
+                        }
+                        match self.spark_generated_mnemonic.clone() {
+                            Some(mnemonic) => mnemonic,
+                            None => {
+                                self.error =
+                                    Some("Generate a Spark recovery phrase first.".to_string());
+                                return Task::none();
+                            }
+                        }
+                    }
+                    SparkSetupMode::Restore => {
+                        let words = self.spark_restore_words.join(" ");
+                        match bip39::Mnemonic::parse_in(bip39::Language::English, &words) {
+                            Ok(mnemonic) => mnemonic.to_string(),
+                            Err(e) => {
+                                self.error = Some(format!("Invalid Spark recovery phrase: {}", e));
+                                return Task::none();
+                            }
+                        }
+                    }
+                };
+
+                self.creating_cube = true;
+                let network = self.network;
+                let cube_name = self.create_cube_name.value.trim().to_string();
+                let pin = self.create_cube_pin.value();
+                let datadir_path = self.datadir_path.clone();
+                let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
+
+                Task::perform(
+                    async move {
+                        let liquid_signer = match liquid_setup {
+                            PendingLiquidWallet::Generate => {
+                                HotSigner::generate(network).map_err(|e| {
+                                    format!("Failed to generate Liquid wallet signer: {}", e)
+                                })?
+                            }
+                            PendingLiquidWallet::Restore(words) => {
+                                let mnemonic =
+                                    bip39::Mnemonic::parse_in(bip39::Language::English, words)
+                                        .map_err(|e| {
+                                            format!("Failed to parse Liquid mnemonic: {}", e)
+                                        })?;
+                                HotSigner::from_mnemonic(network, mnemonic).map_err(|e| {
+                                    format!("Failed to restore from mnemonic: {}", e)
+                                })?
+                            }
+                        };
+
+                        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+                        let liquid_fingerprint = liquid_signer.fingerprint(&secp);
+                        let network_dir = datadir_path.network_directory(network);
+                        network_dir
+                            .init()
+                            .map_err(|e| format!("Failed to create network directory: {}", e))?;
+
+                        let timestamp = chrono::Utc::now().timestamp();
+                        let liquid_checksum = format!("liquid_{}", timestamp);
+                        liquid_signer
+                            .store_encrypted(
+                                datadir_path.path(),
+                                network,
+                                &secp,
+                                Some((liquid_checksum, timestamp)),
+                                Some(&pin),
+                            )
+                            .map_err(|e| {
+                                format!("Failed to store Liquid wallet mnemonic: {}", e)
+                            })?;
+
+                        let spark_path =
+                            settings::spark_wallet_state_path(&network_dir, &cube_id.to_string());
+                        if let Some(parent) = spark_path.parent() {
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                format!("Failed to create Spark wallet directory: {}", e)
+                            })?;
+                        }
+                        let mut spark_wallet =
+                            SparkWallet::load(&spark_path).map_err(|e| e.to_string())?;
+                        spark_wallet
+                            .create_wallet(network, Some(&spark_mnemonic))
+                            .map_err(|e| format!("Failed to create Spark wallet: {}", e))?;
+
+                        let cube = CubeSettings::new_with_id(cube_id, cube_name, network)
+                            .with_liquid_signer(liquid_fingerprint)
+                            .with_pin(&pin)
+                            .map_err(|e| format!("Failed to hash PIN: {}", e))?;
+
+                        settings::update_settings_file(&network_dir, |mut settings| {
+                            if settings.cubes.iter().any(|c| c.id == cube.id) {
+                                return Some(settings);
+                            }
+                            settings.cubes.push(cube.clone());
+                            Some(settings)
+                        })
+                        .await
+                        .map(|_| cube)
+                        .map_err(|e| e.to_string())
+                    },
+                    Message::CubeCreated,
+                )
             }
 
             Message::View(ViewMessage::GoToSection(section)) => {
@@ -1422,7 +1560,7 @@ impl Launcher {
                                     State::Cubes {
                                         create_cube: true,
                                         ..
-                                    } | State::NoCube
+                                    } | State::NoCube | State::RecoveryInput | State::SparkSetup
                                 );
                                 if !in_create_form {
                                     self.error.as_ref().map(|e| card::simple(text(e)))
@@ -1434,6 +1572,15 @@ impl Launcher {
                                 State::RecoveryInput => recovery_input_view(
                                     &self.recovery_words,
                                     self.recovery_active_index,
+                                ),
+                                State::SparkSetup => spark_setup_view(
+                                    self.spark_mode,
+                                    self.spark_generated_mnemonic.as_deref(),
+                                    &self.spark_restore_words,
+                                    self.spark_restore_active_index,
+                                    self.spark_backup_confirmed,
+                                    self.error.as_deref(),
+                                    self.creating_cube,
                                 ),
                                 State::Cubes { cubes, create_cube } => {
                                     if *create_cube {
@@ -1900,7 +2047,7 @@ fn create_cube_form<'a>(
         .height(Length::Fixed(44.0))
         .style(theme::button::primary)
     } else {
-        button::primary(None, "Create Cube")
+        button::primary(None, "Continue to Spark Wallet")
             .width(Length::Fixed(200.0))
             .on_press_maybe(if can_create {
                 Some(ViewMessage::CreateCube)
@@ -2191,6 +2338,281 @@ fn recovery_input_view(
         .into()
 }
 
+fn spark_setup_view(
+    mode: SparkSetupMode,
+    generated_mnemonic: Option<&str>,
+    restore_words: &[String; 12],
+    active_index: Option<usize>,
+    backup_confirmed: bool,
+    error: Option<&str>,
+    creating_cube: bool,
+) -> Element<ViewMessage> {
+    use std::time::Duration;
+
+    let selector = Row::new()
+        .spacing(12)
+        .push(
+            if mode == SparkSetupMode::Create {
+                button::primary(None, "Create new Spark wallet")
+            } else {
+                button::secondary(None, "Create new Spark wallet")
+                    .on_press(ViewMessage::SelectSparkMode(SparkSetupMode::Create))
+            }
+            .width(Length::Fixed(220.0)),
+        )
+        .push(
+            if mode == SparkSetupMode::Restore {
+                button::primary(None, "Restore from mnemonic")
+            } else {
+                button::secondary(None, "Restore from mnemonic")
+                    .on_press(ViewMessage::SelectSparkMode(SparkSetupMode::Restore))
+            }
+            .width(Length::Fixed(220.0)),
+        );
+
+    let mode_content = match mode {
+        SparkSetupMode::Create => {
+            let words: Vec<&str> = generated_mnemonic
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect();
+            let mut mnemonic_grid = Column::new().spacing(12).width(Length::Fill);
+            for row in 0..3 {
+                let mut row_widget = Row::new().spacing(12).width(Length::Fill);
+                for col in 0..4 {
+                    let index = row * 4 + col;
+                    let word = words.get(index).copied().unwrap_or("");
+                    row_widget = row_widget.push(
+                        card::simple(
+                            Column::new()
+                                .spacing(4)
+                                .push(
+                                    text(format!("{}. ", index + 1))
+                                        .size(12)
+                                        .color(color::GREY_3),
+                                )
+                                .push(text(word).size(16).bold()),
+                        )
+                        .width(Length::FillPortion(1)),
+                    );
+                }
+                mnemonic_grid = mnemonic_grid.push(row_widget);
+            }
+
+            Column::new()
+                .spacing(16)
+                .push(
+                    p1_regular("Write down this 12-word Spark recovery phrase before continuing.")
+                        .style(theme::text::secondary),
+                )
+                .push(mnemonic_grid)
+                .push(
+                    CheckBox::new(backup_confirmed)
+                        .label("I have backed up this Spark recovery phrase")
+                        .on_toggle(ViewMessage::ToggleSparkBackupConfirmed)
+                        .size(20),
+                )
+        }
+        SparkSetupMode::Restore => {
+            let restore_grid = recovery_word_grid(
+                restore_words,
+                active_index,
+                |index, word| ViewMessage::SparkWordInput { index, word },
+                |index, word| ViewMessage::SelectSparkSuggestion { index, word },
+            );
+            Column::new()
+                .spacing(16)
+                .push(
+                    p1_regular("Enter the 12-word Spark recovery phrase to restore this wallet.")
+                        .style(theme::text::secondary),
+                )
+                .push(restore_grid)
+        }
+    };
+
+    let action_button = if creating_cube {
+        iced::widget::button(
+            Container::new(
+                Row::new()
+                    .spacing(5)
+                    .align_y(Alignment::Center)
+                    .push(text("Creating"))
+                    .push(
+                        Container::new(spinner::typing_text_carousel(
+                            "...",
+                            true,
+                            Duration::from_millis(500),
+                            text,
+                        ))
+                        .width(Length::Fixed(20.0)),
+                    ),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+        )
+        .width(Length::Fixed(200.0))
+        .height(Length::Fixed(44.0))
+        .style(theme::button::primary)
+    } else {
+        button::primary(None, "Finish setup")
+            .width(Length::Fixed(200.0))
+            .on_press(ViewMessage::SubmitSparkSetup)
+    };
+
+    let mut content = Column::new()
+        .spacing(20)
+        .align_x(Alignment::Center)
+        .width(Length::Fixed(760.0))
+        .push(h4_bold("Spark Wallet"))
+        .push(
+            p1_regular("Choose how you want to set up the Spark wallet for this Cube.")
+                .style(theme::text::secondary),
+        )
+        .push(selector)
+        .push(mode_content)
+        .push(
+            Row::new()
+                .spacing(12)
+                .push(
+                    button::secondary(None, "Back")
+                        .width(Length::Fixed(160.0))
+                        .on_press(ViewMessage::BackFromSparkSetup),
+                )
+                .push(action_button),
+        );
+
+    if let Some(error) = error {
+        content = content.push(p1_regular(error).style(theme::text::error));
+    }
+
+    Container::new(content)
+        .padding(20)
+        .center_x(Length::Fill)
+        .into()
+}
+
+fn recovery_word_grid<'a, FInput, FSuggestion>(
+    words: &[String; 12],
+    active_index: Option<usize>,
+    on_input: FInput,
+    on_suggestion: FSuggestion,
+) -> Element<'a, ViewMessage>
+where
+    FInput: Fn(usize, String) -> ViewMessage + Copy + 'a,
+    FSuggestion: Fn(usize, String) -> ViewMessage + Copy + 'a,
+{
+    use coincube_ui::widget::TextInput;
+
+    const INPUT_WIDTH: f32 = 150.0;
+    const INPUT_ROW_HEIGHT: f32 = 46.0;
+    const GRID_COL_SPACING: f32 = 40.0;
+    const GRID_ROW_SPACING: f32 = 30.0;
+    const OVERLAY_TOP_GAP: f32 = 6.0;
+    const GRID_WIDTH: f32 = (INPUT_WIDTH * 4.0) + (GRID_COL_SPACING * 3.0);
+    const OVERLAY_BOTTOM_RESERVE: f32 = 180.0;
+
+    let mut grid = Column::new().spacing(30).align_x(Alignment::Center);
+
+    for row in 0..3 {
+        let mut row_widget = Row::new().spacing(40).align_y(Alignment::Center);
+
+        for col in 0..4 {
+            let index = row * 4 + col;
+            let placeholder = format!("{}.", index + 1);
+
+            row_widget = row_widget.push(
+                TextInput::new(&placeholder, &words[index])
+                    .on_input(move |input| on_input(index, input))
+                    .padding(12)
+                    .width(Length::Fixed(INPUT_WIDTH))
+                    .style(theme::text_input::primary),
+            );
+        }
+
+        grid = grid.push(row_widget);
+    }
+
+    let suggestions_overlay: Option<Element<ViewMessage>> = active_index.and_then(|index| {
+        let word_value = words.get(index)?;
+        if word_value.len() < 2 {
+            return None;
+        }
+
+        let suggestions: Vec<String> = bip39_suggestions(word_value, 12)
+            .into_iter()
+            .filter(|s| s != word_value)
+            .take(6)
+            .collect();
+        if suggestions.is_empty() {
+            return None;
+        }
+
+        let suggestion_list = suggestions.into_iter().fold(
+            Column::new().spacing(2).width(Length::Fill),
+            |col, suggestion| {
+                col.push(
+                    iced::widget::button(text(suggestion.clone()))
+                        .style(theme::button::secondary)
+                        .width(Length::Fill)
+                        .on_press(on_suggestion(index, suggestion)),
+                )
+            },
+        );
+
+        let row = index / 4;
+        let col = index % 4;
+        let top_offset =
+            row as f32 * (INPUT_ROW_HEIGHT + GRID_ROW_SPACING) + INPUT_ROW_HEIGHT + OVERLAY_TOP_GAP;
+        let left_offset = col as f32 * (INPUT_WIDTH + GRID_COL_SPACING);
+
+        Some(
+            Column::new()
+                .push(Space::new().height(Length::Fixed(top_offset)))
+                .push(
+                    Row::new()
+                        .push(Space::new().width(Length::Fill))
+                        .push(
+                            Container::new(
+                                Row::new()
+                                    .push(Space::new().width(Length::Fixed(left_offset)))
+                                    .push(
+                                        Container::new(suggestion_list)
+                                            .width(Length::Fixed(INPUT_WIDTH))
+                                            .padding(6)
+                                            .style(theme::card::simple),
+                                    )
+                                    .push(Space::new().width(Length::Fill)),
+                            )
+                            .width(Length::Fixed(GRID_WIDTH)),
+                        )
+                        .push(Space::new().width(Length::Fill)),
+                )
+                .into(),
+        )
+    });
+
+    let overlay_layer: Element<ViewMessage> = suggestions_overlay.unwrap_or_else(|| {
+        Container::new(Space::new())
+            .width(Length::Fill)
+            .height(Length::Shrink)
+            .into()
+    });
+
+    let section_base: Element<ViewMessage> = Column::new()
+        .push(
+            Row::new()
+                .width(Length::Fill)
+                .align_y(Alignment::Center)
+                .push(Space::new().width(Length::Fill))
+                .push(grid)
+                .push(Space::new().width(Length::Fill)),
+        )
+        .push(Space::new().height(Length::Fixed(OVERLAY_BOTTOM_RESERVE)))
+        .into();
+
+    Stack::new().push(section_base).push(overlay_layer).into()
+}
+
 fn has_existing_wallet(data_dir: &CoincubeDirectory, network: Network) -> bool {
     data_dir
         .path()
@@ -2281,6 +2703,18 @@ pub enum ViewMessage {
     },
     SubmitRecovery,
     CancelRecovery,
+    SelectSparkMode(SparkSetupMode),
+    ToggleSparkBackupConfirmed(bool),
+    SparkWordInput {
+        index: usize,
+        word: String,
+    },
+    SelectSparkSuggestion {
+        index: usize,
+        word: String,
+    },
+    BackFromSparkSetup,
+    SubmitSparkSetup,
     /// Open the rename modal for a cube at the given index.
     RenameCube(usize),
     /// Update the name input in the rename modal.
@@ -2480,6 +2914,18 @@ impl DeleteCubeModal {
                 let network_dir = self.network_directory.clone();
                 let cube_id = self.cube.id.clone();
                 if let Err(e) = Handle::current().block_on(async {
+                    let spark_path = settings::spark_wallet_state_path(&network_dir, &cube_id);
+                    match tokio::fs::remove_file(&spark_path).await {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                "Failed to delete Spark wallet state at {}: {}",
+                                spark_path.display(),
+                                err
+                            );
+                        }
+                    }
                     settings::update_settings_file(&network_dir, |mut settings| {
                         settings.cubes.retain(|cube| cube.id != cube_id);
                         // Delete file if both cubes and wallets are empty

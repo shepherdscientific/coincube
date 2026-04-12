@@ -49,6 +49,8 @@ pub struct Cache {
     pub connect_authenticated: bool,
     /// Whether this cube has a vault wallet configured
     pub has_vault: bool,
+    /// Whether this cube has a Spark wallet configured
+    pub has_spark: bool,
     /// Display name of the current Cube
     pub cube_name: String,
     /// Whether the P2P panel is available (requires a valid mnemonic)
@@ -84,6 +86,7 @@ impl std::default::Default for Cache {
             connect_expanded: false,
             connect_authenticated: false,
             has_vault: false,
+            has_spark: false,
             cube_name: String::new(),
             has_p2p: false,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),

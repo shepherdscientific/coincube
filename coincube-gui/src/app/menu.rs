@@ -3,11 +3,17 @@ use coincube_core::miniscript::bitcoin::{OutPoint, Txid};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Menu {
     Home,
+    Spark(SparkSubMenu),
     Liquid(LiquidSubMenu),
     Vault(VaultSubMenu),
     Marketplace(MarketplaceSubMenu),
     Connect(ConnectSubMenu),
     Settings(SettingsSubMenu),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SparkSubMenu {
+    Overview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

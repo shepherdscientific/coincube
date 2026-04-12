@@ -16,7 +16,7 @@ fuzz/corpus
 result
 release_build
 release_assets
-.env
+.env.*
 bin/
 lib/
 pyvenv.cfg
@@ -41,3 +41,9 @@ clippy-report.json
 audit-report.json
 audit-sonar.json
 clippy-sonar.json
+scripts/**/
+progress.txt
+opencode.*json*
+prd.json
+
+.aider*

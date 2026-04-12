@@ -15,6 +15,9 @@ use crate::{
 pub use crate::database::{CoinStatus, LabelItem};
 
 use coincube_core::descriptors;
+use coincube_core::spark_wallet::{
+    SparkBalance, SparkTransaction, SparkWalletError, SparkWalletInfo,
+};
 use coincube_core::spend::{
     self, create_spend, AddrInfo, AncestorInfo, CandidateCoin, CreateSpendRes, SpendCreationError,
     SpendOutputAddress, SpendTxFees, TxGetter,
@@ -72,6 +75,8 @@ pub enum CommandError {
     InvalidDerivationIndex,
     RbfError(RbfErrorInfo),
     EmptyFilterList,
+    SparkWallet(String),
+    SparkWalletInternal(String),
 }
 
 impl fmt::Display for CommandError {
@@ -130,6 +135,8 @@ impl fmt::Display for CommandError {
             }
             Self::RbfError(e) => write!(f, "RBF error: '{}'.", e),
             Self::EmptyFilterList => write!(f, "Filter list is empty, should supply None instead."),
+            Self::SparkWallet(e) => write!(f, "Spark wallet error: {}.", e),
+            Self::SparkWalletInternal(e) => write!(f, "Spark wallet internal error: {}.", e),
         }
     }
 }
@@ -139,6 +146,24 @@ impl std::error::Error for CommandError {}
 impl From<SpendCreationError> for CommandError {
     fn from(e: SpendCreationError) -> Self {
         CommandError::SpendCreation(e)
+    }
+}
+
+impl From<SparkWalletError> for CommandError {
+    fn from(e: SparkWalletError) -> Self {
+        match e {
+            SparkWalletError::WalletNotInitialized
+            | SparkWalletError::WalletAlreadyExists
+            | SparkWalletError::InvalidMnemonic(_)
+            | SparkWalletError::InvalidRecipient
+            | SparkWalletError::InvalidAmount
+            | SparkWalletError::InsufficientFunds { .. } => {
+                CommandError::SparkWallet(e.to_string())
+            }
+            SparkWalletError::Io(_) | SparkWalletError::Serde(_) => {
+                CommandError::SparkWalletInternal(e.to_string())
+            }
+        }
     }
 }
 
@@ -313,6 +338,14 @@ impl DaemonControl {
             .expect("block height must fit in u32");
         spend::anti_fee_sniping_locktime(now, tip_height, tip_time)
     }
+
+    fn with_spark_wallet<T>(
+        &self,
+        f: impl FnOnce(&mut coincube_core::spark_wallet::SparkWallet) -> Result<T, SparkWalletError>,
+    ) -> Result<T, CommandError> {
+        let mut wallet = self.spark_wallet.lock().unwrap();
+        f(&mut wallet).map_err(CommandError::from)
+    }
 }
 
 impl DaemonControl {
@@ -358,6 +391,40 @@ impl DaemonControl {
             .derive(new_index, &self.secp)
             .address(self.config.bitcoin_config.network);
         GetAddressResult::new(address, new_index)
+    }
+
+    pub fn spark_create_wallet(
+        &self,
+        mnemonic: Option<String>,
+    ) -> Result<SparkCreateWalletResult, CommandError> {
+        let info = self.with_spark_wallet(|wallet| {
+            wallet.create_wallet(self.config.bitcoin_config.network, mnemonic.as_deref())
+        })?;
+        Ok(SparkCreateWalletResult { wallet: info })
+    }
+
+    pub fn spark_get_balance(&self) -> Result<SparkBalanceResult, CommandError> {
+        let balance = self.with_spark_wallet(|wallet| wallet.get_balance())?;
+        Ok(SparkBalanceResult { balance })
+    }
+
+    pub fn spark_get_address(&self) -> Result<SparkAddressResult, CommandError> {
+        let address = self.with_spark_wallet(|wallet| wallet.receive_address())?;
+        Ok(SparkAddressResult { address })
+    }
+
+    pub fn spark_send(
+        &self,
+        recipient: String,
+        amount_sat: u64,
+    ) -> Result<SparkSendResult, CommandError> {
+        let transaction = self.with_spark_wallet(|wallet| wallet.send(&recipient, amount_sat))?;
+        Ok(SparkSendResult { transaction })
+    }
+
+    pub fn spark_get_transactions(&self) -> Result<SparkTransactionsResult, CommandError> {
+        let transactions = self.with_spark_wallet(|wallet| wallet.get_transactions())?;
+        Ok(SparkTransactionsResult { transactions })
     }
 
     /// Update derivation indexes
@@ -1512,6 +1579,31 @@ pub struct ListTransactionsResult {
     pub transactions: Vec<TransactionInfo>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparkCreateWalletResult {
+    pub wallet: SparkWalletInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparkBalanceResult {
+    pub balance: SparkBalance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparkAddressResult {
+    pub address: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparkSendResult {
+    pub transaction: SparkTransaction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparkTransactionsResult {
+    pub transactions: Vec<SparkTransaction>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionInfo {
     #[serde(serialize_with = "ser_hex", deserialize_with = "deser_hex")]
@@ -1574,6 +1666,101 @@ mod tests {
         assert_ne!(addr, addr2);
 
         ms.shutdown();
+    }
+
+    #[test]
+    fn spark_wallet_commands_persist_and_list_transactions() {
+        let tmp_dir = tmp_dir();
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let root_directory: std::path::PathBuf = [tmp_dir.as_path(), std::path::Path::new("d")]
+            .iter()
+            .collect();
+        std::fs::create_dir_all(&root_directory).unwrap();
+        let data_directory = root_directory.join("bitcoin");
+
+        let network = bitcoin::Network::Bitcoin;
+        let bitcoin_config = crate::config::BitcoinConfig {
+            network,
+            poll_interval_secs: std::time::Duration::from_secs(2),
+        };
+        let owner_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap());
+        let heir_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap());
+        let policy = descriptors::CoincubePolicy::new_legacy(
+            owner_key,
+            [(10_000, heir_key)].iter().cloned().collect(),
+        )
+        .unwrap();
+        let desc = descriptors::CoincubeDescriptor::new(policy);
+        let config = crate::config::Config::new(
+            bitcoin_config,
+            None,
+            log::LevelFilter::Debug,
+            desc,
+            crate::datadir::DataDirectory::new(data_directory),
+        );
+
+        let handle = crate::DaemonHandle::start(
+            config.clone(),
+            Some(DummyBitcoind::new()),
+            Some(DummyDatabase::new()),
+            false,
+        )
+        .unwrap();
+        {
+            let control = match &handle {
+                crate::DaemonHandle::Controller { control, .. } => control,
+                crate::DaemonHandle::Server { .. } => unreachable!(),
+            };
+
+            let created = control
+                .spark_create_wallet(Some(
+                    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string(),
+                ))
+                .unwrap();
+            assert_eq!(created.wallet.network, "bitcoin");
+
+            let address = control.spark_get_address().unwrap().address;
+            assert!(address.starts_with("spark:bitcoin:"));
+
+            control
+                .spark_wallet()
+                .lock()
+                .unwrap()
+                .credit("spark:peer:test", 50_000)
+                .unwrap();
+
+            let balance = control.spark_get_balance().unwrap();
+            assert_eq!(balance.balance.sats, 50_000);
+
+            let sent = control
+                .spark_send("lnbc1qqtestrecipient".to_string(), 20_000)
+                .unwrap();
+            assert_eq!(sent.transaction.amount_sat, 20_000);
+
+            let txs = control.spark_get_transactions().unwrap();
+            assert_eq!(txs.transactions.len(), 2);
+            assert_eq!(control.spark_get_balance().unwrap().balance.sats, 30_000);
+        }
+
+        handle.stop().unwrap();
+
+        let reloaded_handle = crate::DaemonHandle::start(
+            config,
+            Some(DummyBitcoind::new()),
+            Some(DummyDatabase::new()),
+            false,
+        )
+        .unwrap();
+        {
+            let reloaded = match &reloaded_handle {
+                crate::DaemonHandle::Controller { control, .. } => control,
+                crate::DaemonHandle::Server { .. } => unreachable!(),
+            };
+            assert_eq!(reloaded.spark_get_balance().unwrap().balance.sats, 30_000);
+        }
+        reloaded_handle.stop().unwrap();
+
+        std::fs::remove_dir_all(tmp_dir).unwrap();
     }
 
     #[test]
