@@ -899,9 +899,10 @@ impl State for LiquidSend {
                                 Some(kind) => {
                                     self.uri_asset = Some(kind);
                                     let target_asset = match kind {
-                                        AssetKind::Usdt => SendAsset::Usdt,
-                                        AssetKind::Lbtc => SendAsset::Lbtc,
-                                    };
+                                          AssetKind::Usdt => SendAsset::Usdt,
+                                          AssetKind::Lbtc => SendAsset::Lbtc,
+                                          AssetKind::Btkn => SendAsset::Lbtc, // BTKN not yet supported in Liquid send
+                                     };
                                     // On usdt_only screen with L-BTC URI: auto-enable
                                     // cross-asset (pay from USDt, receiver gets L-BTC).
                                     // Only on mainnet where SideSwap is available.

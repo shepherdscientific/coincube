@@ -11,6 +11,17 @@ pub const USDT_ASSET_ID_MAINNET: &str =
     "ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2";
 
 // ---------------------------------------------------------------------------
+// Spark BTKN token (Bitcoin-native stablecoin)
+// ---------------------------------------------------------------------------
+// Note: BTKN is a Spark Protocol stablecoin. For now, we use a placeholder
+// asset ID since the actual BTKN asset ID on Spark needs to be determined.
+// In production, this would be the actual asset ID returned by the Spark SSP.
+// ---------------------------------------------------------------------------
+
+pub const BTKN_ASSET_ID_MAINNET: &str =
+    "btkn_placeholder_asset_id_1234567890abcdef1234567890abcdef1234567890abcdef1234";
+
+// ---------------------------------------------------------------------------
 // Regtest Liquid asset IDs
 // L-BTC on regtest uses the native Elements regtest asset.
 // USDt on regtest is environment-specific (must be issued locally) — no fixed
@@ -26,6 +37,7 @@ pub const LBTC_ASSET_ID_REGTEST: &str =
 
 pub const USDT_PRECISION: u8 = 8;
 pub const LBTC_PRECISION: u8 = 8;
+pub const BTKN_PRECISION: u8 = 8;
 
 // ---------------------------------------------------------------------------
 // AssetKind
@@ -35,6 +47,7 @@ pub const LBTC_PRECISION: u8 = 8;
 pub enum AssetKind {
     Lbtc,
     Usdt,
+    Btkn,
 }
 
 impl AssetKind {
@@ -42,6 +55,7 @@ impl AssetKind {
         match self {
             AssetKind::Lbtc => "L-BTC",
             AssetKind::Usdt => "USDt",
+            AssetKind::Btkn => "BTKN",
         }
     }
 
@@ -49,6 +63,7 @@ impl AssetKind {
         match self {
             AssetKind::Lbtc => "Liquid Bitcoin",
             AssetKind::Usdt => "Tether USD",
+            AssetKind::Btkn => "Bitcoin Native Stablecoin",
         }
     }
 
@@ -56,6 +71,7 @@ impl AssetKind {
         match self {
             AssetKind::Lbtc => LBTC_PRECISION,
             AssetKind::Usdt => USDT_PRECISION,
+            AssetKind::Btkn => BTKN_PRECISION,
         }
     }
 
@@ -64,6 +80,7 @@ impl AssetKind {
         match self {
             AssetKind::Lbtc => lbtc_asset_id(network),
             AssetKind::Usdt => usdt_asset_id(network),
+            AssetKind::Btkn => btkn_asset_id(network),
         }
     }
 }
@@ -90,6 +107,11 @@ pub fn usdt_asset_id(network: Network) -> Option<&'static str> {
     }
 }
 
+/// Returns the BTKN asset ID for the given network, or `None` if unsupported/unknown.
+pub fn btkn_asset_id(_network: Network) -> Option<&'static str> {
+    Some(BTKN_ASSET_ID_MAINNET)
+}
+
 /// Resolves the `AssetKind` for a given raw asset ID and network.
 /// Returns `None` for unrecognised asset IDs.
 pub fn asset_kind_for_id(asset_id: &str, network: Network) -> Option<AssetKind> {
@@ -97,6 +119,8 @@ pub fn asset_kind_for_id(asset_id: &str, network: Network) -> Option<AssetKind> 
         Some(AssetKind::Lbtc)
     } else if usdt_asset_id(network) == Some(asset_id) {
         Some(AssetKind::Usdt)
+    } else if btkn_asset_id(network) == Some(asset_id) {
+        Some(AssetKind::Btkn)
     } else {
         None
     }
@@ -258,6 +282,24 @@ mod tests {
     #[test]
     fn test_asset_kind_for_id_unknown() {
         assert_eq!(asset_kind_for_id("unknown_id", Network::Bitcoin), None);
+    }
+
+    #[test]
+    fn test_asset_kind_for_id_btkn() {
+        assert_eq!(
+            asset_kind_for_id(BTKN_ASSET_ID_MAINNET, Network::Bitcoin),
+            Some(AssetKind::Btkn)
+        );
+    }
+
+    #[test]
+    fn test_asset_kind_ticker_btkn() {
+        assert_eq!(AssetKind::Btkn.ticker(), "BTKN");
+    }
+
+    #[test]
+    fn test_asset_kind_precision_btkn() {
+        assert_eq!(AssetKind::Btkn.precision(), BTKN_PRECISION);
     }
 
     #[test]

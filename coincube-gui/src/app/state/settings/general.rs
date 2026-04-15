@@ -108,35 +108,13 @@ pub struct GeneralSettingsState {
     currencies: Vec<Currency>,
     developer_mode: bool,
     show_direction_badges: bool,
+    spark_ssp_url: Option<String>,
     error: Option<Error>,
 }
 
 impl From<GeneralSettingsState> for Box<dyn State> {
     fn from(s: GeneralSettingsState) -> Box<dyn State> {
         Box::new(s)
-    }
-}
-
-impl GeneralSettingsState {
-    pub fn new(
-        cube_id: String,
-        price_setting: PriceSetting,
-        unit_setting: UnitSetting,
-        datadir_path: &CoincubeDirectory,
-    ) -> Self {
-        use crate::app::settings::global::GlobalSettings;
-        let global_path = GlobalSettings::path(datadir_path);
-        let developer_mode = GlobalSettings::load_developer_mode(&global_path);
-        let show_direction_badges = GlobalSettings::load_show_direction_badges(&global_path);
-        Self {
-            cube_id,
-            new_price_setting: price_setting,
-            new_unit_setting: unit_setting,
-            currencies: Vec::new(),
-            developer_mode,
-            show_direction_badges,
-            error: None,
-        }
     }
 }
 
@@ -150,6 +128,7 @@ impl State for GeneralSettingsState {
             &self.currencies,
             self.developer_mode,
             self.show_direction_badges,
+            &self.spark_ssp_url,
         )
     }
 
@@ -174,26 +153,6 @@ impl State for GeneralSettingsState {
         message: Message,
     ) -> Task<Message> {
         match message {
-            Message::Fiat(FiatMessage::SaveChanges) => {
-                self.error = None;
-                tracing::info!(
-                    "Saving cube fiat price setting: {:?}",
-                    self.new_price_setting
-                );
-                let price_setting = self.new_price_setting.clone();
-                let network = cache.network;
-                let datadir_path = cache.datadir_path.clone();
-                let cube_id = self.cube_id.clone();
-                Task::perform(
-                    async move {
-                        update_price_setting(datadir_path, network, cube_id, price_setting).await
-                    },
-                    |res| match res {
-                        Ok(()) => Message::SettingsSaved,
-                        Err(e) => Message::SettingsSaveFailed(e),
-                    },
-                )
-            }
             Message::SettingsSaved => {
                 tracing::info!("GeneralSettingsState: SettingsSaved received");
                 self.error = None;
@@ -222,6 +181,11 @@ impl State for GeneralSettingsState {
                             "GeneralSettingsState: new_unit_setting now set to: {:?}",
                             self.new_unit_setting.display_unit
                         );
+                        self.spark_ssp_url = cube.spark_ssp_url.clone();
+                        tracing::info!(
+                            "GeneralSettingsState: reloaded spark_ssp_url: {:?}",
+                            self.spark_ssp_url
+                        );
                     } else {
                         tracing::warn!(
                             "GeneralSettingsState: Cube not found with id: {}",
@@ -248,6 +212,181 @@ impl State for GeneralSettingsState {
                         );
                         self.new_unit_setting = cube.unit_setting.clone();
                         self.new_price_setting = cube.fiat_price.clone().unwrap_or_default();
+                        self.spark_ssp_url = cube.spark_ssp_url.clone();
+                        tracing::info!(
+                            "Reverting spark_ssp_url to persisted value: {:?}",
+                            self.spark_ssp_url
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Could not revert settings: Cube not found with id: {}",
+                            self.cube_id
+                        );
+                    }
+                } else {
+                    tracing::error!("Could not revert settings: Failed to load settings from disk");
+                }
+                toast_task
+            }
+            Message::View(view::Message::Settings(view::SettingsMessage::SparkSspUrlEdited(url))) => {
+                self.spark_ssp_url = url;
+                Task::none()
+            }
+            Message::Fiat(FiatMessage::SaveChanges) => {
+                self.error = None;
+                tracing::info!(
+                    "Saving cube fiat price setting: {:?}",
+                    self.new_price_setting
+                );
+                let price_setting = self.new_price_setting.clone();
+                let network = cache.network;
+                let datadir_path = cache.datadir_path.clone();
+                let cube_id = self.cube_id.clone();
+                let spark_ssp_url = self.spark_ssp_url.clone();
+                Task::perform(
+                    async move {
+                        update_price_setting_with_spark_ssp_url(
+                            datadir_path,
+                            network,
+                            cube_id,
+                            price_setting,
+                            spark_ssp_url,
+                        ).await
+                    },
+                    |res| match res {
+                        Ok(()) => Message::SettingsSaved,
+                        Err(e) => Message::SettingsSaveFailed(e),
+                    },
+                )
+            }
+            _ => Task::none(),
+        }
+    }
+}
+
+impl GeneralSettingsState {
+    pub fn new(
+        cube_id: String,
+        price_setting: PriceSetting,
+        unit_setting: UnitSetting,
+        datadir_path: &CoincubeDirectory,
+    ) -> Self {
+        use crate::app::settings::global::GlobalSettings;
+        let global_path = GlobalSettings::path(datadir_path);
+        let developer_mode = GlobalSettings::load_developer_mode(&global_path);
+        let show_direction_badges = GlobalSettings::load_show_direction_badges(&global_path);
+        
+        // Load spark_ssp_url from settings file
+        let spark_ssp_url = {
+            let network_dir = datadir_path.network_directory(coincube_core::miniscript::bitcoin::Network::Bitcoin);
+            if let Ok(settings) = crate::app::settings::Settings::from_file(&network_dir) {
+                if let Some(cube) = settings.cubes.iter().find(|c| c.id == cube_id) {
+                    cube.spark_ssp_url.clone()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        
+        Self {
+            cube_id,
+            new_price_setting: price_setting,
+            new_unit_setting: unit_setting,
+            currencies: Vec::new(),
+            developer_mode,
+            show_direction_badges,
+            spark_ssp_url,
+            error: None,
+        }
+    }
+
+    fn reload(
+        &mut self,
+        _daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        _wallet: Option<Arc<Wallet>>,
+    ) -> iced::Task<Message> {
+        if self.new_price_setting.is_enabled {
+            let source = self.new_price_setting.source;
+            return Task::perform(async move { source }, |source| {
+                FiatMessage::ListCurrencies(source).into()
+            });
+        }
+        Task::none()
+    }
+
+    fn update(
+        &mut self,
+        _daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        cache: &Cache,
+        message: Message,
+    ) -> Task<Message> {
+        match message {
+            Message::SettingsSaved => {
+                tracing::info!("GeneralSettingsState: SettingsSaved received");
+                self.error = None;
+                // Reload unit setting from disk to sync toggle state with what was saved
+                let network_dir = cache.datadir_path.network_directory(cache.network);
+                tracing::info!(
+                    "GeneralSettingsState: Loading settings from {:?}",
+                    network_dir.path()
+                );
+                if let Ok(settings) = crate::app::settings::Settings::from_file(&network_dir) {
+                    tracing::info!(
+                        "GeneralSettingsState: Loaded settings, searching for cube_id: {}",
+                        self.cube_id
+                    );
+                    tracing::info!(
+                        "GeneralSettingsState: Available cubes: {:?}",
+                        settings.cubes.iter().map(|c| &c.id).collect::<Vec<_>>()
+                    );
+                    if let Some(cube) = settings.cubes.iter().find(|c| c.id == self.cube_id) {
+                        tracing::info!(
+                            "GeneralSettingsState: Found cube, reloading unit_setting: {:?}",
+                            cube.unit_setting.display_unit
+                        );
+                        self.new_unit_setting = cube.unit_setting.clone();
+                        tracing::info!(
+                            "GeneralSettingsState: new_unit_setting now set to: {:?}",
+                            self.new_unit_setting.display_unit
+                        );
+                        self.spark_ssp_url = cube.spark_ssp_url.clone();
+                        tracing::info!(
+                            "GeneralSettingsState: reloaded spark_ssp_url: {:?}",
+                            self.spark_ssp_url
+                        );
+                    } else {
+                        tracing::warn!(
+                            "GeneralSettingsState: Cube not found with id: {}",
+                            self.cube_id
+                        );
+                    }
+                } else {
+                    tracing::error!("GeneralSettingsState: Failed to load settings from disk");
+                }
+                Task::none()
+            }
+            Message::SettingsSaveFailed(e) => {
+                let err_msg = e.to_string();
+                self.error = Some(e);
+                // Show error in global toast
+                let toast_task = Task::done(Message::View(view::Message::ShowError(err_msg)));
+                // Reload settings from disk to revert toggle state to persisted value
+                let network_dir = cache.datadir_path.network_directory(cache.network);
+                if let Ok(settings) = crate::app::settings::Settings::from_file(&network_dir) {
+                    if let Some(cube) = settings.cubes.iter().find(|c| c.id == self.cube_id) {
+                        tracing::info!(
+                            "Reverting unit_setting to persisted value after save failure: {:?}",
+                            cube.unit_setting.display_unit
+                        );
+                        self.new_unit_setting = cube.unit_setting.clone();
+                        self.new_price_setting = cube.fiat_price.clone().unwrap_or_default();
+                        self.spark_ssp_url = cube.spark_ssp_url.clone();
+                        tracing::info!(
+                            "Reverting spark_ssp_url to persisted value: {:?}",
+                            self.spark_ssp_url
+                        );
                     } else {
                         tracing::warn!(
                             "Could not revert settings: Cube not found with id: {}",
@@ -397,7 +536,81 @@ impl State for GeneralSettingsState {
                     format!("Test {} toast", label),
                 )))
             }
+            Message::View(view::Message::Settings(view::SettingsMessage::SparkSspUrlEdited(url))) => {
+                self.spark_ssp_url = url;
+                Task::none()
+            }
+            Message::Fiat(FiatMessage::SaveChanges) => {
+                self.error = None;
+                tracing::info!(
+                    "Saving cube fiat price setting: {:?}",
+                    self.new_price_setting
+                );
+                let price_setting = self.new_price_setting.clone();
+                let network = cache.network;
+                let datadir_path = cache.datadir_path.clone();
+                let cube_id = self.cube_id.clone();
+                let spark_ssp_url = self.spark_ssp_url.clone();
+                Task::perform(
+                    async move {
+                        update_price_setting_with_spark_ssp_url(
+                            datadir_path,
+                            network,
+                            cube_id,
+                            price_setting,
+                            spark_ssp_url,
+                        ).await
+                    },
+                    |res| match res {
+                        Ok(()) => Message::SettingsSaved,
+                        Err(e) => Message::SettingsSaveFailed(e),
+                    },
+                )
+            }
             _ => Task::none(),
+        }
+    }
+}
+
+async fn update_price_setting_with_spark_ssp_url(
+    data_dir: CoincubeDirectory,
+    network: coincube_core::miniscript::bitcoin::Network,
+    cube_id: String,
+    new_price_setting: PriceSetting,
+    new_spark_ssp_url: Option<String>,
+) -> Result<(), Error> {
+    let network_dir = data_dir.network_directory(network);
+    let mut cube_found = false;
+    let result = update_settings_file(&network_dir, |mut settings| {
+        if let Some(cube) = settings.cubes.iter_mut().find(|c| c.id == cube_id) {
+            cube.fiat_price = Some(new_price_setting);
+            cube.spark_ssp_url = new_spark_ssp_url;
+            cube_found = true;
+        } else {
+            tracing::error!(
+                "Cube not found with id: {} - cannot save price and SSP settings",
+                cube_id
+            );
+            tracing::error!(
+                "Available cubes: {:?}",
+                settings.cubes.iter().map(|c| &c.id).collect::<Vec<_>>()
+            );
+        }
+        Some(settings)
+    })
+    .await;
+
+    match result {
+        Ok(()) if cube_found => Ok(()),
+        Ok(()) => Err(Error::Unexpected(
+            "Cube not found in settings file".to_string(),
+        )),
+        Err(e) => {
+            tracing::error!("Failed to save price and SSP settings: {:?}", e);
+            Err(Error::Unexpected(format!(
+                "Failed to update settings: {}",
+                e
+            )))
         }
     }
 }

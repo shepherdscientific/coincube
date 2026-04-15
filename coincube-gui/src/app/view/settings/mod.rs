@@ -1,6 +1,7 @@
 pub mod about;
 pub mod general;
 pub mod install_stats;
+pub mod spark;
 
 use iced::widget::{Column, Row};
 use iced::{Alignment, Length};
@@ -82,6 +83,11 @@ pub fn list<'a>(menu: &'a Menu, cache: &'a Cache) -> Element<'a, Message> {
                 "Download Stats",
                 icon::graph_icon(),
                 Message::Settings(SettingsMessage::InstallStatsSection),
+            ))
+            .push(settings_section(
+                "Spark",
+                icon::spark_icon(),
+                Message::Settings(SettingsMessage::SparkSection),
             )),
     )
 }

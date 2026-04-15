@@ -1,6 +1,7 @@
-mod about;
-mod general;
-mod install_stats;
+pub mod about;
+pub mod general;
+pub mod install_stats;
+pub mod spark;
 
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use coincube_ui::widget::Element;
 use about::AboutSettingsState;
 use general::GeneralSettingsState;
 use install_stats::InstallStatsState;
+use spark::SparkSettingsState;
 
 use crate::{
     app::{
@@ -84,6 +86,13 @@ impl State for SettingsState {
                     .map(|s| s.reload(daemon, None))
                     .unwrap_or_else(Task::none)
             }
+            Message::View(view::Message::Settings(view::SettingsMessage::SparkSection)) => {
+                self.setting = Some(SparkSettingsState::default().into());
+                self.setting
+                    .as_mut()
+                    .map(|s| s.reload(daemon, None))
+                    .unwrap_or_else(Task::none)
+            }
             Message::SettingsSaved => {
                 // Update tracked price and unit settings when saved
                 if let Ok(settings) = crate::app::settings::Settings::from_file(
@@ -94,6 +103,8 @@ impl State for SettingsState {
                         if let Some(price_setting) = cube.fiat_price.clone() {
                             self.current_price_setting = price_setting;
                         }
+                        // Reload spark_ssp_url if the current view is GeneralSettingsState
+                        // This will be handled by GeneralSettingsState's SettingsSaved handler
                     }
                 }
                 self.setting

@@ -417,14 +417,51 @@ impl DaemonControl {
         &self,
         recipient: String,
         amount_sat: u64,
+        asset_type: coincube_core::spark_wallet::SparkAssetType,
     ) -> Result<SparkSendResult, CommandError> {
-        let transaction = self.with_spark_wallet(|wallet| wallet.send(&recipient, amount_sat))?;
+        let transaction =
+            self.with_spark_wallet(|wallet| wallet.send(&recipient, amount_sat, asset_type))?;
         Ok(SparkSendResult { transaction })
     }
 
     pub fn spark_get_transactions(&self) -> Result<SparkTransactionsResult, CommandError> {
         let transactions = self.with_spark_wallet(|wallet| wallet.get_transactions())?;
         Ok(SparkTransactionsResult { transactions })
+    }
+
+    pub fn spark_deposit_from_vault(
+        &self,
+        amount_sat: u64,
+        asset_type: coincube_core::spark_wallet::SparkAssetType,
+    ) -> Result<SparkDepositResult, CommandError> {
+        let transaction =
+            self.with_spark_wallet(|wallet| wallet.deposit_from_vault(amount_sat, asset_type))?;
+        Ok(SparkDepositResult { transaction })
+    }
+
+    pub fn spark_withdraw_to_vault(
+        &self,
+        amount_sat: u64,
+        asset_type: coincube_core::spark_wallet::SparkAssetType,
+    ) -> Result<SparkWithdrawResult, CommandError> {
+        let transaction =
+            self.with_spark_wallet(|wallet| wallet.withdraw_to_vault(amount_sat, asset_type))?;
+        Ok(SparkWithdrawResult { transaction })
+    }
+
+    pub fn spark_get_ssp_url(&self) -> Result<SparkSspUrlResult, CommandError> {
+        let wallet = self.spark_wallet.lock().unwrap();
+        let ssp_url = wallet.get_ssp_url();
+        Ok(SparkSspUrlResult { ssp_url })
+    }
+
+    pub fn spark_set_ssp_url(
+        &self,
+        ssp_url: Option<String>,
+    ) -> Result<SparkSetSspUrlResult, CommandError> {
+        let mut wallet = self.spark_wallet.lock().unwrap();
+        wallet.set_ssp_url(ssp_url);
+        Ok(SparkSetSspUrlResult { success: true })
     }
 
     /// Update derivation indexes
@@ -1604,6 +1641,26 @@ pub struct SparkTransactionsResult {
     pub transactions: Vec<SparkTransaction>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparkDepositResult {
+    pub transaction: SparkTransaction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparkWithdrawResult {
+    pub transaction: SparkTransaction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparkSspUrlResult {
+    pub ssp_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparkSetSspUrlResult {
+    pub success: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionInfo {
     #[serde(serialize_with = "ser_hex", deserialize_with = "deser_hex")]
@@ -1683,8 +1740,8 @@ mod tests {
             network,
             poll_interval_secs: std::time::Duration::from_secs(2),
         };
-        let owner_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap());
-        let heir_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap());
+        let owner_key = descriptors::PathInfo::Single(miniscript::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap());
+        let heir_key = descriptors::PathInfo::Single(miniscript::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap());
         let policy = descriptors::CoincubePolicy::new_legacy(
             owner_key,
             [(10_000, heir_key)].iter().cloned().collect(),

@@ -4,7 +4,7 @@ use iced::{Alignment, Length};
 use coincube_ui::component::card;
 use coincube_ui::component::text::*;
 use coincube_ui::theme;
-use coincube_ui::widget::*;
+use coincube_ui::widget::{TextInput, *};
 
 use crate::app::cache;
 use crate::app::menu::Menu;
@@ -22,13 +22,15 @@ pub fn general_section<'a>(
     currencies_list: &'a [Currency],
     developer_mode: bool,
     show_direction_badges: bool,
+    spark_ssp_url: &'a Option<String>,
 ) -> Element<'a, Message> {
     let mut col = Column::new()
         .spacing(20)
         .push(super::header("General", SettingsMessage::GeneralSection))
         .push(bitcoin_display_unit(new_unit_setting))
         .push(direction_badges_toggle(show_direction_badges))
-        .push(fiat_price(new_price_setting, currencies_list));
+        .push(fiat_price(new_price_setting, currencies_list))
+        .push(spark_ssp_url_section(spark_ssp_url));
 
     if developer_mode {
         col = col.push(toast_testing());
@@ -179,6 +181,39 @@ pub fn fiat_price<'a>(
                             .push(Space::new().width(Length::Fill))
                             .push(text(s))
                     }),
+            ),
+    )
+    .width(Length::Fill)
+    .into()
+}
+
+fn spark_ssp_url_section<'a>(ssp_url: &'a Option<String>) -> Element<'a, Message> {
+    let ssp_url_value = ssp_url.as_deref().unwrap_or("");
+    card::simple(
+        Column::new()
+            .spacing(15)
+            .push(text("Spark Service Provider (SSP) URL").bold())
+            .push(text("Configure the Spark Service Provider URL for your Spark wallet").small())
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .push(text("SSP URL:").width(Length::Fill))
+                    .push(
+                        TextInput::new(
+                            "Enter Spark SSP URL (e.g., https://api.lightspark.com)",
+                            ssp_url_value,
+                        )
+                        .on_input(move |input: String| {
+                            SettingsMessage::SparkSspUrlEdited(if input.is_empty() {
+                                None
+                            } else {
+                                Some(input)
+                            })
+                            .into()
+                        })
+                        .width(Length::Fill),
+                    ),
             ),
     )
     .width(Length::Fill)

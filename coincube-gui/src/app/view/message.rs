@@ -93,6 +93,9 @@ pub enum Message {
     OpenUrl(String),
     Home(HomeMessage),
     SparkOverview(SparkOverviewMessage),
+    SparkReceive(SparkReceiveMessage),
+    SparkSend(SparkSendMessage),
+    SparkMoveFunds(SparkMoveFundsMessage),
     LiquidOverview(LiquidOverviewMessage),
     LiquidReceive(LiquidReceiveMessage),
     VaultReceive(VaultReceiveMessage),
@@ -117,12 +120,76 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub enum SparkOverviewMessage {
     RefreshRequested,
+    Send,
+    Receive,
+    MoveFunds,
     Loaded {
         wallet_id: String,
-        balance: Amount,
+        balance: coincube_core::spark_wallet::SparkBalance,
         transactions: Vec<coincube_core::spark_wallet::SparkTransaction>,
     },
     LoadFailed(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum SparkReceiveMessage {
+    ToggleMethod(crate::app::state::spark_receive::SparkReceiveMethod),
+    ShowQrCode,
+    CloseQrCode,
+    Copy,
+    GenerateAddress,
+    GenerateInvoice,
+    SparkAddressGenerated(String),
+    LightningInvoiceGenerated(String),
+    AmountInput(String),
+    DescriptionInput(String),
+    Error(String),
+    ClearError,
+}
+
+#[derive(Debug, Clone)]
+pub enum SparkSendMessage {
+    RecipientInput(String),
+    AmountInput(String),
+    DescriptionInput(String),
+    FeeEstimateRequested,
+    FeeEstimated(u64), // satoshis
+    ShowConfirmation,
+    SendConfirmed,
+    CancelSend,
+    SendCompleted(String), // transaction ID
+    Error(String),
+    ClearError,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveFundsDirection {
+    VaultToSpark,
+    SparkToVault,
+}
+
+impl MoveFundsDirection {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            MoveFundsDirection::VaultToSpark => "Vault → Spark",
+            MoveFundsDirection::SparkToVault => "Spark → Vault",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SparkMoveFundsMessage {
+    ToggleDirection(MoveFundsDirection),
+    AmountInput(String),
+    EstimateRequested,
+    FeeEstimated(u64),  // satoshis
+    TimeEstimated(u64), // seconds
+    MoveRequested,
+    MoveCompleted(String), // transaction ID
+    Error(String),
+    ClearError,
+    Close,
 }
 
 impl Close for Message {
@@ -239,6 +306,8 @@ pub enum SettingsMessage {
     InstallStats(InstallStatsViewMessage),
     TestToast(log::Level),
     ToggleDirectionBadges(bool),
+    SparkSspUrlEdited(Option<String>),
+    SparkSection,
 }
 
 #[derive(Debug, Clone)]

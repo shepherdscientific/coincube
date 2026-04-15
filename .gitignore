@@ -47,3 +47,4 @@ opencode.*json*
 prd.json
 
 .aider*
+.env

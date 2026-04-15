@@ -210,6 +210,10 @@ pub struct Config {
     /// is true (Connect is primary until then); cleared after the switch.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub pending_bitcoind: Option<BitcoindConfig>,
+    /// Optional Spark Service Provider (SSP) URL for Spark wallet operations.
+    /// If not set, a default SSP will be used by the Spark wallet SDK.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub spark_ssp_url: Option<String>,
 }
 
 impl Config {
@@ -229,6 +233,7 @@ impl Config {
             data_dir: None,
             fallback_esplora: None,
             pending_bitcoind: None,
+            spark_ssp_url: None,
         }
     }
 

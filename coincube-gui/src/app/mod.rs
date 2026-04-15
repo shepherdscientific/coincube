@@ -30,8 +30,8 @@ pub use message::Message;
 
 use state::{
     CoinsPanel, ConnectPanel, CreateSpendPanel, GlobalHome, LiquidOverview, LiquidReceive,
-    LiquidSend, LiquidSettings, LiquidTransactions, PsbtsPanel, SparkOverview, State,
-    VaultOverview, VaultReceivePanel, VaultTransactionsPanel,
+    LiquidSend, LiquidSettings, LiquidTransactions, PsbtsPanel, SparkMoveFunds, SparkOverview,
+    SparkReceive, SparkSend, State, VaultOverview, VaultReceivePanel, VaultTransactionsPanel,
 };
 use wallet::{sync_status, SyncStatus};
 
@@ -66,6 +66,9 @@ struct Panels {
     // Always available panels
     global_home: GlobalHome,
     spark_overview: Option<SparkOverview>,
+    spark_send: Option<SparkSend>,
+    spark_receive: Option<SparkReceive>,
+    spark_move_funds: Option<SparkMoveFunds>,
     liquid_overview: LiquidOverview,
     liquid_send: LiquidSend,
     liquid_receive: LiquidReceive,
@@ -149,6 +152,12 @@ impl Panels {
             },
             spark_overview: has_spark
                 .then(|| SparkOverview::new(datadir.clone(), network, cube_id.clone())),
+            spark_send: has_spark
+                .then(|| SparkSend::new(datadir.clone(), network, cube_id.clone())),
+            spark_receive: has_spark
+                .then(|| SparkReceive::new(datadir.clone(), network, cube_id.clone())),
+            spark_move_funds: has_spark
+                .then(|| SparkMoveFunds::new(datadir.clone(), network, cube_id.clone())),
             liquid_overview: LiquidOverview::new(breez_client.clone()),
             liquid_send: LiquidSend::new(breez_client.clone()),
             liquid_receive: LiquidReceive::new(breez_client.clone()),
@@ -243,6 +252,12 @@ impl Panels {
             ),
             spark_overview: has_spark
                 .then(|| SparkOverview::new(data_dir.clone(), cache.network, cube_id.clone())),
+            spark_send: has_spark
+                .then(|| SparkSend::new(data_dir.clone(), cache.network, cube_id.clone())),
+            spark_receive: has_spark
+                .then(|| SparkReceive::new(data_dir.clone(), cache.network, cube_id.clone())),
+            spark_move_funds: has_spark
+                .then(|| SparkMoveFunds::new(data_dir.clone(), cache.network, cube_id.clone())),
             vault_overview: Some(VaultOverview::new(
                 wallet.clone(),
                 cache.coins(),
@@ -439,9 +454,12 @@ impl Panels {
     fn current(&self) -> Option<&dyn State> {
         match &self.current {
             Menu::Home => Some(&self.global_home),
-            Menu::Spark(SparkSubMenu::Overview) => {
-                self.spark_overview.as_ref().map(|v| v as &dyn State)
-            }
+            Menu::Spark(submenu) => match submenu {
+                SparkSubMenu::Overview => self.spark_overview.as_ref().map(|v| v as &dyn State),
+                SparkSubMenu::Send => self.spark_send.as_ref().map(|v| v as &dyn State),
+                SparkSubMenu::Receive => self.spark_receive.as_ref().map(|v| v as &dyn State),
+                SparkSubMenu::MoveFunds => self.spark_move_funds.as_ref().map(|v| v as &dyn State),
+            },
             Menu::Liquid(submenu) => match submenu {
                 crate::app::menu::LiquidSubMenu::Overview => Some(&self.liquid_overview),
                 crate::app::menu::LiquidSubMenu::Send => Some(&self.liquid_send),
@@ -489,9 +507,14 @@ impl Panels {
     fn current_mut(&mut self) -> Option<&mut dyn State> {
         match &self.current {
             Menu::Home => Some(&mut self.global_home),
-            Menu::Spark(SparkSubMenu::Overview) => {
-                self.spark_overview.as_mut().map(|v| v as &mut dyn State)
-            }
+            Menu::Spark(submenu) => match submenu {
+                SparkSubMenu::Overview => self.spark_overview.as_mut().map(|v| v as &mut dyn State),
+                SparkSubMenu::Send => self.spark_send.as_mut().map(|v| v as &mut dyn State),
+                SparkSubMenu::Receive => self.spark_receive.as_mut().map(|v| v as &mut dyn State),
+                SparkSubMenu::MoveFunds => {
+                    self.spark_move_funds.as_mut().map(|v| v as &mut dyn State)
+                }
+            },
             Menu::Liquid(submenu) => match submenu {
                 crate::app::menu::LiquidSubMenu::Overview => Some(&mut self.liquid_overview),
                 crate::app::menu::LiquidSubMenu::Send => Some(&mut self.liquid_send),
@@ -687,6 +710,9 @@ impl App {
         }
         if let Some(spark_overview) = panels.spark_overview.as_mut() {
             tasks.push(spark_overview.reload(Some(daemon.clone()), Some(wallet.clone())));
+        }
+        if let Some(spark_receive) = panels.spark_receive.as_mut() {
+            tasks.push(spark_receive.reload(Some(daemon.clone()), Some(wallet.clone())));
         }
         tasks.push(
             panels

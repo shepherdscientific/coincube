@@ -573,8 +573,9 @@ pub async fn load_application(
         .map(|res| res.coins)?;
 
     // Both last poll fields start with the same value.
+    let datadir_path = config.datadir_path.clone();
     let cache = Cache {
-        datadir_path: config.datadir_path,
+        datadir_path: datadir_path.clone(),
         network: config.info.network,
         last_poll_at_startup: config.info.last_poll_timestamp,
         daemon_cache: DaemonCache {
@@ -597,7 +598,7 @@ pub async fn load_application(
         connect_authenticated: false,
         has_vault: true,
         has_spark: crate::app::settings::has_spark_wallet_state(
-            &config.datadir_path.network_directory(config.info.network),
+            &datadir_path.network_directory(config.info.network),
             &config.cube_settings.id,
         ),
         cube_name: config.cube_settings.name.clone(),

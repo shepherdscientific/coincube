@@ -1,8 +1,12 @@
+pub mod move_funds;
+pub mod send;
+
+use std::convert::TryInto;
 use std::sync::Arc;
 
 use coincube_core::{
     miniscript::bitcoin::Amount,
-    spark_wallet::{SparkTransaction, SparkWallet, SparkWalletInfo},
+    spark_wallet::{SparkTransaction, SparkWallet, SparkWalletInfo, SparkBalance},
 };
 use coincube_ui::widget::Element;
 use iced::{Subscription, Task};
@@ -10,7 +14,7 @@ use iced::{Subscription, Task};
 use crate::{
     app::{
         cache::Cache,
-        menu::Menu,
+        menu::{Menu, SparkSubMenu},
         settings,
         state::State,
         view::{self, SparkOverviewMessage},
@@ -26,7 +30,8 @@ pub struct SparkOverview {
     network: coincube_core::miniscript::bitcoin::Network,
     cube_id: String,
     wallet_id: Option<String>,
-    balance: Amount,
+    btc_balance: Amount,
+    btkn_balance: Amount,
     transactions: Vec<SparkTransaction>,
     error: Option<String>,
 }
@@ -42,7 +47,8 @@ impl SparkOverview {
             network,
             cube_id,
             wallet_id: None,
-            balance: Amount::ZERO,
+            btc_balance: Amount::ZERO,
+            btkn_balance: Amount::ZERO,
             transactions: Vec::new(),
             error: None,
         }
@@ -55,30 +61,33 @@ impl SparkOverview {
         )
     }
 
-    fn load_wallet_snapshot(path: std::path::PathBuf) -> Result<(SparkWalletInfo, Amount, Vec<SparkTransaction>), String> {
+    fn load_wallet_snapshot(
+        path: std::path::PathBuf,
+    ) -> Result<(SparkWalletInfo, SparkBalance, Vec<SparkTransaction>), String> {
         let wallet = SparkWallet::load(path).map_err(|e| e.to_string())?;
         let info = wallet.wallet_info().map_err(|e| e.to_string())?;
         let balance = wallet.get_balance().map_err(|e| e.to_string())?;
         let transactions = wallet.get_transactions().map_err(|e| e.to_string())?;
-        Ok((info, Amount::from_sat(balance.sats), transactions))
+        Ok((info, balance, transactions))
     }
 }
 
 impl State for SparkOverview {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
-        view::dashboard(
-            menu,
-            cache,
-            view::spark::spark_overview_view(
-                self.wallet_id.as_deref(),
-                self.balance,
-                &self.transactions,
-                self.error.as_deref(),
-                cache.bitcoin_unit,
-                cache.fiat_price.as_ref().map(|price| price.converter()),
-            )
-            .map(view::Message::SparkOverview),
+        let fiat_converter: Option<crate::app::view::vault::fiat::FiatAmountConverter> =
+            cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
+        let content = view::spark::spark_overview_view(
+            self.wallet_id.as_deref(),
+            self.btc_balance,
+            self.btkn_balance,
+            &self.transactions,
+            self.error.as_deref(),
+            cache.bitcoin_unit,
+            fiat_converter,
         )
+        .map(view::Message::SparkOverview);
+
+        view::dashboard(menu, cache, content)
     }
 
     fn update(
@@ -93,27 +102,47 @@ impl State for SparkOverview {
                     let path = self.wallet_path();
                     return Task::perform(async move { Self::load_wallet_snapshot(path) }, |res| {
                         match res {
-                            Ok((info, balance, transactions)) => Message::View(view::Message::SparkOverview(
-                                SparkOverviewMessage::Loaded {
+                            Ok((info, balance, transactions)) => Message::View(
+                                view::Message::SparkOverview(SparkOverviewMessage::Loaded {
                                     wallet_id: info.wallet_id,
                                     balance,
                                     transactions,
-                                },
-                            )),
+                                }),
+                            ),
                             Err(e) => Message::View(view::Message::SparkOverview(
                                 SparkOverviewMessage::LoadFailed(e),
                             )),
                         }
                     });
                 }
-                SparkOverviewMessage::Loaded { wallet_id, balance, transactions } => {
+                SparkOverviewMessage::Loaded {
+                    wallet_id,
+                    balance,
+                    transactions,
+                } => {
                     self.wallet_id = Some(wallet_id);
-                    self.balance = balance;
+                    self.btc_balance = Amount::from_sat(balance.bitcoin_sats);
+                    self.btkn_balance = Amount::from_sat(balance.btkn_sats);
                     self.transactions = transactions;
                     self.error = None;
                 }
                 SparkOverviewMessage::LoadFailed(e) => {
                     self.error = Some(e);
+                }
+                SparkOverviewMessage::Send => {
+                    return Task::done(Message::View(view::Message::Menu(Menu::Spark(
+                        SparkSubMenu::Send,
+                    ))));
+                }
+                SparkOverviewMessage::Receive => {
+                    return Task::done(Message::View(view::Message::Menu(Menu::Spark(
+                        SparkSubMenu::Receive,
+                    ))));
+                }
+                SparkOverviewMessage::MoveFunds => {
+                    return Task::done(Message::View(view::Message::Menu(Menu::Spark(
+                        SparkSubMenu::MoveFunds,
+                    ))));
                 }
             }
         }

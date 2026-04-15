@@ -523,11 +523,101 @@ fn spark_send(control: &DaemonControl, params: Params) -> Result<serde_json::Val
         .ok_or_else(|| Error::invalid_params("Missing 'amount_sat' parameter."))?
         .as_u64()
         .ok_or_else(|| Error::invalid_params("Invalid 'amount_sat' parameter."))?;
-    Ok(serde_json::json!(control.spark_send(recipient, amount_sat)?))
+    let asset_type_str = params
+        .get(2, "asset_type")
+        .ok_or_else(|| Error::invalid_params("Missing 'asset_type' parameter."))?
+        .as_str()
+        .unwrap_or("bitcoin");
+    let asset_type = match asset_type_str {
+        "bitcoin" => coincube_core::spark_wallet::SparkAssetType::Bitcoin,
+        "btkn" => coincube_core::spark_wallet::SparkAssetType::Btkn,
+        _ => {
+            return Err(Error::invalid_params(
+                "Invalid 'asset_type' parameter. Must be 'bitcoin' or 'btkn'.",
+            ))
+        }
+    };
+    Ok(serde_json::json!(
+        control.spark_send(recipient, amount_sat, asset_type)?
+    ))
 }
 
 fn spark_get_transactions(control: &DaemonControl) -> Result<serde_json::Value, Error> {
     Ok(serde_json::json!(control.spark_get_transactions()?))
+}
+
+fn spark_deposit_from_vault(
+    control: &DaemonControl,
+    params: Params,
+) -> Result<serde_json::Value, Error> {
+    let amount_sat = params
+        .get(0, "amount_sat")
+        .ok_or_else(|| Error::invalid_params("Missing 'amount_sat' parameter."))?
+        .as_u64()
+        .ok_or_else(|| Error::invalid_params("Invalid 'amount_sat' parameter."))?;
+    let asset_type_str = params
+        .get(1, "asset_type")
+        .ok_or_else(|| Error::invalid_params("Missing 'asset_type' parameter."))?
+        .as_str()
+        .unwrap_or("bitcoin");
+    let asset_type = match asset_type_str {
+        "bitcoin" => coincube_core::spark_wallet::SparkAssetType::Bitcoin,
+        "btkn" => coincube_core::spark_wallet::SparkAssetType::Btkn,
+        _ => {
+            return Err(Error::invalid_params(
+                "Invalid 'asset_type' parameter. Must be 'bitcoin' or 'btkn'.",
+            ))
+        }
+    };
+    Ok(serde_json::json!(
+        control.spark_deposit_from_vault(amount_sat, asset_type)?
+    ))
+}
+
+fn spark_withdraw_to_vault(
+    control: &DaemonControl,
+    params: Params,
+) -> Result<serde_json::Value, Error> {
+    let amount_sat = params
+        .get(0, "amount_sat")
+        .ok_or_else(|| Error::invalid_params("Missing 'amount_sat' parameter."))?
+        .as_u64()
+        .ok_or_else(|| Error::invalid_params("Invalid 'amount_sat' parameter."))?;
+    let asset_type_str = params
+        .get(1, "asset_type")
+        .ok_or_else(|| Error::invalid_params("Missing 'asset_type' parameter."))?
+        .as_str()
+        .unwrap_or("bitcoin");
+    let asset_type = match asset_type_str {
+        "bitcoin" => coincube_core::spark_wallet::SparkAssetType::Bitcoin,
+        "btkn" => coincube_core::spark_wallet::SparkAssetType::Btkn,
+        _ => {
+            return Err(Error::invalid_params(
+                "Invalid 'asset_type' parameter. Must be 'bitcoin' or 'btkn'.",
+            ))
+        }
+    };
+    Ok(serde_json::json!(
+        control.spark_withdraw_to_vault(amount_sat, asset_type)?
+    ))
+}
+
+fn spark_get_ssp_url(control: &DaemonControl) -> Result<serde_json::Value, Error> {
+    let result = control.spark_get_ssp_url()?;
+    Ok(serde_json::json!(result))
+}
+
+fn spark_set_ssp_url(control: &DaemonControl, params: Params) -> Result<serde_json::Value, Error> {
+    let ssp_url = params
+        .get(0, "ssp_url")
+        .map(|p| {
+            p.as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| Error::invalid_params("Invalid 'ssp_url' parameter."))
+        })
+        .transpose()?;
+    let result = control.spark_set_ssp_url(ssp_url)?;
+    Ok(serde_json::json!(result))
 }
 
 /// Handle an incoming JSONRPC2 request.
@@ -618,6 +708,31 @@ pub fn handle_request(control: &mut DaemonControl, req: Request) -> Result<Respo
             spark_send(control, params)?
         }
         "spark_get_transactions" => spark_get_transactions(control)?,
+        "spark_deposit_from_vault" => {
+            let params = req.params.ok_or_else(|| {
+                Error::invalid_params(
+                    "The 'spark_deposit_from_vault' command requires 1 parameter: 'amount_sat'",
+                )
+            })?;
+            spark_deposit_from_vault(control, params)?
+        }
+        "spark_withdraw_to_vault" => {
+            let params = req.params.ok_or_else(|| {
+                Error::invalid_params(
+                    "The 'spark_withdraw_to_vault' command requires 1 parameter: 'amount_sat'",
+                )
+            })?;
+            spark_withdraw_to_vault(control, params)?
+        }
+        "spark_get_ssp_url" => spark_get_ssp_url(control)?,
+        "spark_set_ssp_url" => {
+            let params = req.params.ok_or_else(|| {
+                Error::invalid_params(
+                    "The 'spark_set_ssp_url' command requires 1 parameter: 'ssp_url'",
+                )
+            })?;
+            spark_set_ssp_url(control, params)?
+        }
         "startrescan" => {
             let params = req
                 .params
@@ -685,7 +800,7 @@ mod tests {
                 req(
                     "spark_create_wallet",
                     Some(Params::Map(
-                        [(
+                        vec![(
                             "mnemonic".to_string(),
                             serde_json::json!(
                                 "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"

@@ -14,6 +14,9 @@ pub enum Menu {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SparkSubMenu {
     Overview,
+    Send,
+    Receive,
+    MoveFunds,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

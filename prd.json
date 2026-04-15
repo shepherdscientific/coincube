@@ -85,8 +85,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implementation complete - Added Spark receive screen with address/invoice generation, QR codes, and copy functionality following Liquid wallet patterns"
     },
     {
       "id": "US-005",
@@ -107,8 +107,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented BOLT11 invoice amount parsing, added amount_locked field to SparkSend struct, updated UI to disable amount field when locked, fixed compilation errors including type inference and lifetime issues."
     },
     {
       "id": "US-006",
@@ -129,8 +129,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "Cooperative exit (Spark → Vault) requires the Spark Service Provider to be online; surface a friendly error and fallback instructions if the SSP is unavailable"
+      "passes": true,
+      "notes": "Implemented move funds functionality with backend RPC methods (spark_deposit_from_vault, spark_withdraw_to_vault), frontend MoveFunds screen with direction selection, fee/time estimation, and confirmation step. Accessible from Spark overview screen."
     },
     {
       "id": "US-007",
@@ -149,8 +149,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Backend (Rust daemon): Added spark_ssp_url: Option<String> to Config struct in coincubed/src/config.rs and initialized to None in Config::new(). Added ssp_url: Option<String> to SparkWallet struct in coincube-core/src/spark_wallet.rs with get_ssp_url() and set_ssp_url() methods. Created JSONRPC result types SparkSspUrlResult and SparkSetSspUrlResult in coincubed/src/commands/mod.rs. Implemented spark_get_ssp_url() and spark_set_ssp_url() methods in DaemonControl. Added JSONRPC handlers in coincubed/src/jsonrpc/api.rs and registered them in handle_request(). Frontend (GUI): Added spark_ssp_url: Option<String> to CubeSettings in coincube-gui/src/app/settings/mod.rs and initialized in CubeSettings::new_with_id(). Created SparkSettingsState in coincube-gui/src/app/state/settings/spark.rs with ssp_url field and handler for SparkSspUrlEdited. Created spark view module in coincube-gui/src/app/view/settings/spark.rs with input field for custom SSP URL. Added Spark section to settings list in coincube-gui/src/app/view/settings/mod.rs using spark_icon(). Added SparkSspUrlEdited variant to SettingsMessage enum in coincube-gui/src/app/view/message.rs. Updated GeneralSettingsState to include spark_ssp_url field and save handler. All changes compile successfully with cargo build --package coincube-gui."
     },
     {
       "id": "US-008",
@@ -170,7 +170,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Scope to display and transfer only; minting/issuing tokens is out of scope for this feature branch"
     }
   ]

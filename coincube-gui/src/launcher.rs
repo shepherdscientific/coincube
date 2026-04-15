@@ -2338,15 +2338,15 @@ fn recovery_input_view(
         .into()
 }
 
-fn spark_setup_view(
+fn spark_setup_view<'a>(
     mode: SparkSetupMode,
-    generated_mnemonic: Option<&str>,
-    restore_words: &[String; 12],
+    generated_mnemonic: Option<&'a str>,
+    restore_words: &'a [String; 12],
     active_index: Option<usize>,
     backup_confirmed: bool,
-    error: Option<&str>,
+    error: Option<&'a str>,
     creating_cube: bool,
-) -> Element<ViewMessage> {
+) -> Element<'a, ViewMessage> {
     use std::time::Duration;
 
     let selector = Row::new()

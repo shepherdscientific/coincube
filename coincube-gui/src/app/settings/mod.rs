@@ -176,6 +176,9 @@ pub struct CubeSettings {
     /// Persisted pending Liquid -> Vault transfer, used to restore UX state across app restarts
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_liquid_to_vault_transfer: Option<PendingLiquidToVaultTransfer>,
+    /// Spark Service Provider (SSP) URL configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spark_ssp_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -204,6 +207,7 @@ impl CubeSettings {
             unit_setting: unit::UnitSetting::default(),
             fiat_price: Some(fiat::PriceSetting::default()), // Initialize with default (enabled: true)
             pending_liquid_to_vault_transfer: None,
+            spark_ssp_url: None,
         }
     }
 

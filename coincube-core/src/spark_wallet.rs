@@ -71,6 +71,13 @@ pub enum SparkTransactionDirection {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum SparkAssetType {
+    Bitcoin,
+    Btkn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum SparkTransactionStatus {
     Pending,
     Confirmed,
@@ -81,6 +88,7 @@ pub struct SparkTransaction {
     pub txid: String,
     pub direction: SparkTransactionDirection,
     pub amount_sat: u64,
+    pub asset_type: SparkAssetType,
     pub counterparty: String,
     pub timestamp: u64,
     pub status: SparkTransactionStatus,
@@ -95,7 +103,8 @@ pub struct SparkWalletInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SparkBalance {
-    pub sats: u64,
+    pub bitcoin_sats: u64,
+    pub btkn_sats: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,7 +112,8 @@ struct SparkWalletState {
     wallet_id: String,
     network: String,
     mnemonic: String,
-    balance_sat: u64,
+    bitcoin_balance_sat: u64,
+    btkn_balance_sat: u64,
     next_address_index: u64,
     next_tx_index: u64,
     transactions: Vec<SparkTransaction>,
@@ -112,6 +122,7 @@ struct SparkWalletState {
 pub struct SparkWallet {
     state_path: PathBuf,
     state: Option<SparkWalletState>,
+    ssp_url: Option<String>,
 }
 
 impl SparkWallet {
@@ -122,7 +133,11 @@ impl SparkWallet {
         } else {
             None
         };
-        Ok(Self { state_path, state })
+        Ok(Self {
+            state_path,
+            state,
+            ssp_url: None,
+        })
     }
 
     pub fn create_wallet(
@@ -152,7 +167,8 @@ impl SparkWallet {
             wallet_id: wallet_id.clone(),
             network: network.to_string(),
             mnemonic: mnemonic_string.clone(),
-            balance_sat: 0,
+            bitcoin_balance_sat: 0,
+            btkn_balance_sat: 0,
             next_address_index: 0,
             next_tx_index: 0,
             transactions: Vec::new(),
@@ -174,7 +190,8 @@ impl SparkWallet {
             .as_ref()
             .ok_or(SparkWalletError::WalletNotInitialized)?;
         Ok(SparkBalance {
-            sats: state.balance_sat,
+            bitcoin_sats: state.bitcoin_balance_sat,
+            btkn_sats: state.btkn_balance_sat,
         })
     }
 
@@ -203,6 +220,7 @@ impl SparkWallet {
         &mut self,
         recipient: &str,
         amount_sat: u64,
+        asset_type: SparkAssetType,
     ) -> Result<SparkTransaction, SparkWalletError> {
         if recipient.trim().is_empty() {
             return Err(SparkWalletError::InvalidRecipient);
@@ -217,18 +235,27 @@ impl SparkWallet {
                 .as_mut()
                 .ok_or(SparkWalletError::WalletNotInitialized)?;
 
-            if amount_sat > state.balance_sat {
+            let available_balance = match asset_type {
+                SparkAssetType::Bitcoin => state.bitcoin_balance_sat,
+                SparkAssetType::Btkn => state.btkn_balance_sat,
+            };
+
+            if amount_sat > available_balance {
                 return Err(SparkWalletError::InsufficientFunds {
-                    available: state.balance_sat,
+                    available: available_balance,
                     requested: amount_sat,
                 });
             }
 
-            state.balance_sat -= amount_sat;
+            match asset_type {
+                SparkAssetType::Bitcoin => state.bitcoin_balance_sat -= amount_sat,
+                SparkAssetType::Btkn => state.btkn_balance_sat -= amount_sat,
+            }
             let tx = SparkTransaction {
                 txid: transaction_id(&state.wallet_id, state.next_tx_index, recipient, amount_sat),
                 direction: SparkTransactionDirection::Sent,
                 amount_sat,
+                asset_type,
                 counterparty: recipient.to_string(),
                 timestamp: now_timestamp(),
                 status: SparkTransactionStatus::Pending,
@@ -270,6 +297,7 @@ impl SparkWallet {
         &mut self,
         sender: &str,
         amount_sat: u64,
+        asset_type: SparkAssetType,
     ) -> Result<SparkTransaction, SparkWalletError> {
         if sender.trim().is_empty() {
             return Err(SparkWalletError::InvalidRecipient);
@@ -284,11 +312,19 @@ impl SparkWallet {
                 .as_mut()
                 .ok_or(SparkWalletError::WalletNotInitialized)?;
 
-            state.balance_sat = state.balance_sat.saturating_add(amount_sat);
+            match asset_type {
+                SparkAssetType::Bitcoin => {
+                    state.bitcoin_balance_sat = state.bitcoin_balance_sat.saturating_add(amount_sat)
+                }
+                SparkAssetType::Btkn => {
+                    state.btkn_balance_sat = state.btkn_balance_sat.saturating_add(amount_sat)
+                }
+            }
             let tx = SparkTransaction {
                 txid: transaction_id(&state.wallet_id, state.next_tx_index, sender, amount_sat),
                 direction: SparkTransactionDirection::Received,
                 amount_sat,
+                asset_type,
                 counterparty: sender.to_string(),
                 timestamp: now_timestamp(),
                 status: SparkTransactionStatus::Confirmed,
@@ -300,6 +336,114 @@ impl SparkWallet {
 
         self.persist()?;
         Ok(tx)
+    }
+
+    pub fn deposit_from_vault(
+        &mut self,
+        amount_sat: u64,
+        asset_type: SparkAssetType,
+    ) -> Result<SparkTransaction, SparkWalletError> {
+        if amount_sat == 0 {
+            return Err(SparkWalletError::InvalidAmount);
+        }
+
+        let tx = {
+            let state = self
+                .state
+                .as_mut()
+                .ok_or(SparkWalletError::WalletNotInitialized)?;
+
+            match asset_type {
+                SparkAssetType::Bitcoin => {
+                    state.bitcoin_balance_sat = state.bitcoin_balance_sat.saturating_add(amount_sat)
+                }
+                SparkAssetType::Btkn => {
+                    state.btkn_balance_sat = state.btkn_balance_sat.saturating_add(amount_sat)
+                }
+            }
+            let tx = SparkTransaction {
+                txid: transaction_id(
+                    &state.wallet_id,
+                    state.next_tx_index,
+                    "vault_deposit",
+                    amount_sat,
+                ),
+                direction: SparkTransactionDirection::Received,
+                amount_sat,
+                asset_type,
+                counterparty: "Vault".to_string(),
+                timestamp: now_timestamp(),
+                status: SparkTransactionStatus::Confirmed,
+            };
+            state.next_tx_index = state.next_tx_index.saturating_add(1);
+            state.transactions.insert(0, tx.clone());
+            tx
+        };
+
+        self.persist()?;
+        Ok(tx)
+    }
+
+    pub fn withdraw_to_vault(
+        &mut self,
+        amount_sat: u64,
+        asset_type: SparkAssetType,
+    ) -> Result<SparkTransaction, SparkWalletError> {
+        if amount_sat == 0 {
+            return Err(SparkWalletError::InvalidAmount);
+        }
+
+        let tx = {
+            let state = self
+                .state
+                .as_mut()
+                .ok_or(SparkWalletError::WalletNotInitialized)?;
+
+            let available_balance = match asset_type {
+                SparkAssetType::Bitcoin => state.bitcoin_balance_sat,
+                SparkAssetType::Btkn => state.btkn_balance_sat,
+            };
+
+            if amount_sat > available_balance {
+                return Err(SparkWalletError::InsufficientFunds {
+                    available: available_balance,
+                    requested: amount_sat,
+                });
+            }
+
+            match asset_type {
+                SparkAssetType::Bitcoin => state.bitcoin_balance_sat -= amount_sat,
+                SparkAssetType::Btkn => state.btkn_balance_sat -= amount_sat,
+            }
+            let tx = SparkTransaction {
+                txid: transaction_id(
+                    &state.wallet_id,
+                    state.next_tx_index,
+                    "vault_withdrawal",
+                    amount_sat,
+                ),
+                direction: SparkTransactionDirection::Sent,
+                amount_sat,
+                asset_type,
+                counterparty: "Vault".to_string(),
+                timestamp: now_timestamp(),
+                status: SparkTransactionStatus::Confirmed,
+            };
+            state.next_tx_index = state.next_tx_index.saturating_add(1);
+            state.transactions.insert(0, tx.clone());
+            tx
+        };
+
+        self.persist()?;
+        Ok(tx)
+    }
+
+    pub fn get_ssp_url(&self) -> Option<String> {
+        self.ssp_url.clone()
+    }
+
+    pub fn set_ssp_url(&mut self, url: Option<String>) {
+        self.ssp_url = url;
     }
 
     fn persist(&self) -> Result<(), SparkWalletError> {
@@ -353,16 +497,26 @@ mod tests {
             let info = wallet.create_wallet(Network::Bitcoin, None).unwrap();
             let receive = wallet.receive_address().unwrap();
             assert!(receive.starts_with("spark:bitcoin:"));
-            wallet.credit("spark:peer:demo", 42_000).unwrap();
-            wallet.send("lnbc1recipient", 12_345).unwrap();
+            wallet
+                .credit("spark:peer:demo", 42_000, SparkAssetType::Bitcoin)
+                .unwrap();
+            wallet
+                .send("lnbc1recipient", 12_345, SparkAssetType::Bitcoin)
+                .unwrap();
             info
         };
 
         let wallet = SparkWallet::load(&state_path).unwrap();
         let reloaded_info = wallet.wallet_info().unwrap();
         assert_eq!(reloaded_info.wallet_id, info.wallet_id);
-        assert_eq!(wallet.get_balance().unwrap().sats, 29_655);
+        let balance = wallet.get_balance().unwrap();
+        assert_eq!(balance.bitcoin_sats, 29_655);
+        assert_eq!(balance.btkn_sats, 0);
         assert_eq!(wallet.get_transactions().unwrap().len(), 2);
+        assert_eq!(
+            wallet.get_transactions().unwrap()[0].asset_type,
+            SparkAssetType::Bitcoin
+        );
 
         fs::remove_file(state_path).unwrap();
     }
