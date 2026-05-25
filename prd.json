@@ -41,7 +41,7 @@
       "id": "US-HW-006",
       "description": "Implement balance and TX history push (device-initiated). The CoinCube firmware can send BALANCE_REQUEST:<address> and TX_HISTORY:<address> to poll the host for on-chain data. The desktop should handle these out-of-band messages during the active session. Add a CoinCubeSession struct (or extend CoinCubeDevice) that spawns a background task listening for device-initiated messages, dispatches BALANCE_REQUEST to an Electrum/Esplora query, and sends back BALANCE:<conf>:<unconf>\\n and TX:<txid>:<dir>:<amount>:<confirms>\\n entries. Acceptance criteria: (1) BALANCE_REQUEST triggers a network query; (2) response sent within 30 s timeout; (3) multiple TX entries sent sequentially; (4) background task terminates cleanly when CoinCubeDevice is dropped.",
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
