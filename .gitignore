@@ -43,3 +43,20 @@ audit-report.json
 audit-sonar.json
 clippy-sonar.json
 wildcard-cleanup-plan.md
+
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.v4/
+.env.*
+opencode.json
+opencode.json.example
+
+# Ignore everything inside the scripts folder
+scripts/**
+
+# Whitelist files directly inside the scripts folder
+!scripts/*
+
+progress.txt
+plotter.py
+
