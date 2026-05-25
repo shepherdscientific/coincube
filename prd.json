@@ -20,7 +20,7 @@
       "id": "US-HW-003",
       "description": "Implement CoinCubeDevice struct with serial port enumeration. enumerate_ports() returns Vec<String> of candidate port paths, filtered by device description substring 'CoinCube' or by USB VID 0x303A (Espressif CDC) / PID 0x4001 (or fallback: any port responding to GET_INFO with 'READY:'). new(port_path: String) opens the port, sends 'GET_INFO\\n' (or waits for READY), parses fingerprint+version+xpub from the response, stores them. Acceptance criteria: (1) enumerate_ports() compiles on macOS, Linux, Windows; (2) new() returns Err(DeviceNotFound) if port does not respond in 3 s; (3) struct fields: port, fingerprint: Fingerprint, version: Version, account_xpub: Xpub.",
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
