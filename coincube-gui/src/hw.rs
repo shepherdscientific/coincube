@@ -89,11 +89,19 @@ impl HardwareWallet {
         })
     }
 
-    fn id(&self) -> &String {
+    pub fn id(&self) -> &String {
         match self {
             Self::Locked { id, .. } => id,
             Self::Unsupported { id, .. } => id,
             Self::Supported { id, .. } => id,
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        if self.id().starts_with("coincube-") {
+            "CoinCube".to_string()
+        } else {
+            self.kind().to_string()
         }
     }
 

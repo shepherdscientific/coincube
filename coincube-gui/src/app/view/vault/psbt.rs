@@ -1377,7 +1377,6 @@ pub fn sign_action_toasts<'a>(
         .iter()
         .filter_map(|hw| {
             if let HardwareWallet::Supported {
-                kind,
                 fingerprint,
                 version,
                 alias,
@@ -1387,7 +1386,7 @@ pub fn sign_action_toasts<'a>(
                 if signing.contains(fingerprint) {
                     Some(
                         coincube_ui::component::notification::processing_hardware_wallet(
-                            kind,
+                            hw.display_name(),
                             version.as_ref(),
                             fingerprint,
                             alias.as_ref().map(|x| x.as_str()),

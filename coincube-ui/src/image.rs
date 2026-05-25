@@ -107,6 +107,13 @@ pub fn key_mark_icon<'a>() -> Svg<'a, Theme> {
     Svg::new(h)
 }
 
+const COINCUBE_HW_ICON: &[u8] = include_bytes!("../static/icons/coincube-hw.svg");
+
+pub fn coin_cube_hw_icon<'a>() -> Svg<'a, Theme> {
+    let h = svg::Handle::from_memory(COINCUBE_HW_ICON);
+    Svg::new(h)
+}
+
 const INHERITANCE_TEMPLATE_DESC: &[u8] =
     include_bytes!("../static/images/inheritance_template_description.svg");
 

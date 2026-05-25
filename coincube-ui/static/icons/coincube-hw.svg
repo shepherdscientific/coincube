@@ -1,0 +1,13 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Isometric cube representing CoinCube hardware wallet -->
+  <g transform="translate(16, 14)">
+    <!-- Bottom face -->
+    <polygon points="0,9 -9,5 0,0 9,5" fill="#2D2D2D" stroke="#1E1E1E" stroke-width="0.75"/>
+    <!-- Left face -->
+    <polygon points="-9,5 -9,-5 0,-9 0,0" fill="#3D3D3D" stroke="#1E1E1E" stroke-width="0.75"/>
+    <!-- Right face -->
+    <polygon points="0,0 0,-9 9,-5 9,5" fill="#FF7A00" stroke="#1E1E1E" stroke-width="0.75"/>
+    <!-- Top face highlight -->
+    <polygon points="-4,-2 -2,-4 4,-2 2,0" fill="none" stroke="#FFB366" stroke-width="0.5" opacity="0.6"/>
+  </g>
+</svg>

@@ -24,7 +24,7 @@ use coincube_ui::{
         button, card, collapse, form, hw,
         text::{h2, h3, h4_bold, p1_bold, p1_regular, text, Text},
     },
-    icon, theme,
+    icon, image, theme,
     widget::*,
 };
 
@@ -1835,6 +1835,8 @@ pub fn hw_list_view<'a>(
     display_account: bool,
 ) -> Element<'a, Message> {
     let mut unrelated = false;
+    let kind_label = hw.display_name();
+    let is_cc = hw.id().starts_with("coincube-");
     let mut bttn = Button::new(match hw {
         HardwareWallet::Supported {
             kind,
@@ -1848,17 +1850,17 @@ pub fn hw_list_view<'a>(
                 .unwrap_or(true);
             let not_tapminiscript = device_must_support_taproot
                 && !is_compatible_with_tapminiscript(kind, version.as_ref());
-            if !device_in_descriptor {
+            let content = if !device_in_descriptor {
                 unrelated = true;
-                hw::unrelated_hardware_wallet(kind.to_string(), version.as_ref(), fingerprint)
+                hw::unrelated_hardware_wallet(kind_label.clone(), version.as_ref(), fingerprint)
             } else if chosen && processing {
-                hw::processing_hardware_wallet(kind, version.as_ref(), fingerprint, alias.as_ref())
+                hw::processing_hardware_wallet(&kind_label, version.as_ref(), fingerprint, alias.as_ref())
             } else if selected {
                 let acc = accounts
                     .as_ref()
                     .and_then(|map| map.get(fingerprint).cloned());
                 hw::selected_hardware_wallet(
-                    kind,
+                    &kind_label,
                     version.as_ref(),
                     fingerprint,
                     alias.as_ref(),
@@ -1874,7 +1876,7 @@ pub fn hw_list_view<'a>(
                 )
             } else if not_tapminiscript {
                 hw::warning_hardware_wallet(
-                    kind,
+                    &kind_label,
                     version.as_ref(),
                     fingerprint,
                     alias.as_ref(),
@@ -1882,7 +1884,7 @@ pub fn hw_list_view<'a>(
                 )
             } else if let Some(accounts) = accounts {
                 hw::supported_hardware_wallet_with_account(
-                    kind,
+                    &kind_label,
                     version.as_ref(),
                     *fingerprint,
                     alias.as_ref(),
@@ -1890,33 +1892,46 @@ pub fn hw_list_view<'a>(
                     true,
                 )
             } else {
-                hw::supported_hardware_wallet(kind, version.as_ref(), *fingerprint, alias.as_ref())
+                hw::supported_hardware_wallet(&kind_label, version.as_ref(), *fingerprint, alias.as_ref())
+            };
+            if is_cc {
+                Row::new()
+                    .push(image::coin_cube_hw_icon().width(Length::Fixed(32.0)).height(Length::Fixed(32.0)))
+                    .push(Space::new().width(Length::Fixed(8.0)).height(Length::Fixed(1.0)))
+                    .push(content)
+            } else {
+                Row::new().push(content)
             }
         }
         HardwareWallet::Unsupported {
             version,
-            kind,
             reason,
             ..
-        } => match reason {
-            UnsupportedReason::NotPartOfWallet(fg) => {
-                hw::unrelated_hardware_wallet(kind.to_string(), version.as_ref(), fg)
-            }
-            UnsupportedReason::WrongNetwork => {
-                hw::wrong_network_hardware_wallet(kind.to_string(), version.as_ref())
-            }
-            UnsupportedReason::Version {
-                minimal_supported_version,
-            } => hw::unsupported_version_hardware_wallet(
-                kind.to_string(),
-                version.as_ref(),
-                minimal_supported_version,
-            ),
-            _ => hw::unsupported_hardware_wallet(kind.to_string(), version.as_ref()),
-        },
+        } => {
+            let content = match reason {
+                UnsupportedReason::NotPartOfWallet(fg) => {
+                    hw::unrelated_hardware_wallet(kind_label.clone(), version.as_ref(), fg)
+                }
+                UnsupportedReason::WrongNetwork => {
+                    hw::wrong_network_hardware_wallet(kind_label.clone(), version.as_ref())
+                }
+                UnsupportedReason::Version {
+                    minimal_supported_version,
+                } => hw::unsupported_version_hardware_wallet(
+                    kind_label.clone(),
+                    version.as_ref(),
+                    minimal_supported_version,
+                ),
+                _ => hw::unsupported_hardware_wallet(kind_label.clone(), version.as_ref()),
+            };
+            Row::new().push(content)
+        }
         HardwareWallet::Locked {
-            kind, pairing_code, ..
-        } => hw::locked_hardware_wallet(kind, pairing_code.as_ref()),
+            pairing_code, ..
+        } => {
+            let content = hw::locked_hardware_wallet(kind_label.clone(), pairing_code.as_ref());
+            Row::new().push(content)
+        }
     })
     .style(theme::button::secondary)
     .width(Length::Fill);
