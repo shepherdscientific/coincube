@@ -48,7 +48,7 @@
       "id": "US-HW-007",
       "description": "UI: device-kind label and icon for CoinCube. In the coincube-gui UI layer, check if device id starts with 'coincube-' and display 'CoinCube' as the device name regardless of DeviceKind variant. Add a CoinCube SVG icon to assets. Show firmware version in the device row. Acceptance criteria: (1) connected CoinCube shows 'CoinCube' label; (2) icon renders at 32x32; (3) Specter devices still show 'Specter' label.",
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
