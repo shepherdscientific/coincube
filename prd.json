@@ -6,7 +6,7 @@
       "id": "US-HW-001",
       "description": "Extend READY message to include device info. Currently serial_send_ready() sends only 'READY\\n'. Extend firmware to send 'READY:<fingerprint_hex>:<version_str>:<xpub_m84_base58>\\n' so the desktop can identify the device and cache master fingerprint and account xpub without extra round-trips. Also add 'GET_XPUB:<path>\\n' command (host→device) and 'XPUB:<base58>\\n' response (device→host) for arbitrary derivation paths. Acceptance criteria: (1) wallet1.ino calls serial_send_ready_with_info(fingerprint, version, xpub) after SE init; (2) desktop parses all three fields; (3) unit test in test_serial_transport.cpp validates the parse path; (4) backward-compat: if host sees bare 'READY', it falls back gracefully.",
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
