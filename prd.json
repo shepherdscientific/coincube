@@ -27,7 +27,7 @@
       "id": "US-HW-004",
       "description": "Implement async_hwi::HWI trait for CoinCubeDevice. Required methods: (1) device_kind() -> DeviceKind::Specter (temporary until upstream adds CoinCube variant); (2) get_version() -> Version parsed from READY; (3) get_master_fingerprint() -> Fingerprint parsed from READY; (4) get_extended_pubkey(path) -> send GET_XPUB:<path>, parse XPUB: response, return Xpub; (5) sign_tx(psbt) -> base64-encode psbt, send PSBT:<b64>, wait for SIGNED:<b64> (return Ok) or REJECTED (return Err(UserRefused)) or ERROR:<n> (return Err); (6) display_address(script) -> send VERIFY:<address>, wait for VERIFIED (Ok) or MISMATCH (Err); (7) register_wallet() -> Err(Error::UnsupportedMethod) — firmware has no wallet-policy registry; (8) is_wallet_registered() -> Ok(false). Acceptance criteria: all 8 methods compile; sign_tx round-trip tested with a pre-built test PSBT.",
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
