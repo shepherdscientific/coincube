@@ -13,7 +13,7 @@
       "id": "US-HW-002",
       "description": "Implement CoinCubeTransport — serial port I/O layer. Wraps tokio::io over a serialport (tokio-serial). Responsibilities: open port at 115200 8N1, write a newline-terminated command, read lines with a configurable timeout (default 10 s for signing, 3 s for info queries). Expose: `send(&str) -> Result<(), Error>` and `recv_line(timeout: Duration) -> Result<String, Error>`. Use a Mutex<BufReader<SerialStream>> internally so CoinCubeDevice can be Sync. Acceptance criteria: (1) compiles against tokio-serial 5.x; (2) unit tests with mock transport; (3) timeout returns Error::Timeout after deadline.",
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
