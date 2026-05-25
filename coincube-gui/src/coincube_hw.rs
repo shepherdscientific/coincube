@@ -32,12 +32,14 @@ use coincube_core::miniscript::bitcoin::{
     psbt::Psbt,
 };
 use std::{str::FromStr, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{Mutex, oneshot, watch};
+use tokio_serial::SerialStream;
 use tracing::{debug, info, warn};
 
 // ─── Re-exports for hw.rs integration ────────────────────────────────────────
 
-pub use transport::{CoinCubeTransport, TransportError};
+pub use transport::{CoinCubeTransport, GenericCoinCubeTransport, TransportError};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -53,6 +55,119 @@ const SIGN_TIMEOUT: Duration = Duration::from_secs(120);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for initial handshake / READY detection.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Timeout for device-initiated balance/history queries.
+const DEVICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Read timeout for the session background reader — effectively infinite
+/// (cancellation is driven by a watch channel).
+const SESSION_READ_TIMEOUT: Duration = Duration::from_secs(3600);
+
+// ─── Balance Provider trait ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct TxHistoryEntry {
+    pub txid: String,
+    pub direction: String,
+    pub amount: u64,
+    pub confirms: u32,
+}
+
+#[async_trait]
+pub trait BalanceProvider: Send + Sync {
+    async fn get_balance(&self, address: &str) -> Result<(u64, u64), String>;
+    async fn get_history(&self, address: &str) -> Result<Vec<TxHistoryEntry>, String>;
+}
+
+/// Balance provider backed by an Esplora HTTP API (e.g. mempool.space).
+pub struct EsploraBalanceProvider {
+    client: reqwest::Client,
+    base_url: String,
+}
+
+impl EsploraBalanceProvider {
+    pub fn new(base_url: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base_url,
+        }
+    }
+}
+
+#[async_trait]
+impl BalanceProvider for EsploraBalanceProvider {
+    async fn get_balance(&self, address: &str) -> Result<(u64, u64), String> {
+        let url = format!("{}/address/{}", self.base_url, address);
+        let resp: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?
+            .json()
+            .await
+            .map_err(|e| format!("JSON error: {}", e))?;
+
+        let chain = &resp["chain_stats"];
+        let mempool = &resp["mempool_stats"];
+        let confirmed = chain["funded_txo_sum"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub(chain["spent_txo_sum"].as_u64().unwrap_or(0));
+        let unconfirmed = mempool["funded_txo_sum"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub(mempool["spent_txo_sum"].as_u64().unwrap_or(0));
+        Ok((confirmed, unconfirmed))
+    }
+
+    async fn get_history(&self, address: &str) -> Result<Vec<TxHistoryEntry>, String> {
+        let url = format!("{}/address/{}/txs", self.base_url, address);
+        let txs: Vec<serde_json::Value> = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?
+            .json()
+            .await
+            .map_err(|e| format!("JSON error: {}", e))?;
+
+        let mut entries = Vec::new();
+        for tx in txs {
+            let txid = tx["txid"].as_str().unwrap_or("").to_string();
+            let status = &tx["status"];
+            let height = status["block_height"].as_u64();
+            let confirmed = status["confirmed"].as_bool().unwrap_or(false);
+
+            let mut is_receiving = false;
+            let mut amount: u64 = 0;
+
+            if let Some(vout) = tx["vout"].as_array() {
+                for out in vout {
+                    if out["scriptpubkey_address"].as_str() == Some(address) {
+                        is_receiving = true;
+                        amount = out["value"].as_u64().unwrap_or(0);
+                        break;
+                    }
+                }
+            }
+
+            let direction = if is_receiving { "in" } else { "out" };
+            let confirms = if confirmed {
+                height.map(|h| h as u32).unwrap_or(1)
+            } else {
+                0
+            };
+
+            entries.push(TxHistoryEntry {
+                txid,
+                direction: direction.to_string(),
+                amount,
+                confirms,
+            });
+        }
+        Ok(entries)
+    }
+}
 
 // ─── Transport layer ──────────────────────────────────────────────────────────
 
@@ -251,6 +366,198 @@ pub mod transport {
     }
 }
 
+// ─── CoinCubeSession — background reader + message routing ─────────────────────
+
+struct CoinCubeSession<T: AsyncRead + AsyncWrite + Unpin + Send + 'static = SerialStream> {
+    transport: Arc<GenericCoinCubeTransport<T>>,
+    hwi_response: Mutex<Option<oneshot::Sender<String>>>,
+    balance_provider: Option<Arc<dyn BalanceProvider + Send + Sync>>,
+    cancel_tx: watch::Sender<bool>,
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> CoinCubeSession<T> {
+    fn spawn(
+        transport: Arc<GenericCoinCubeTransport<T>>,
+        balance_provider: Option<Arc<dyn BalanceProvider + Send + Sync>>,
+    ) -> Arc<Self> {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let session = Arc::new(Self {
+            transport,
+            hwi_response: Mutex::new(None),
+            balance_provider,
+            cancel_tx,
+        });
+
+        let session_clone = session.clone();
+        tokio::spawn(async move {
+            reader_loop(session_clone, cancel_rx).await;
+        });
+
+        session
+    }
+
+    fn cancel(&self) {
+        let _ = self.cancel_tx.send(true);
+    }
+
+    async fn send_and_wait(
+        &self,
+        command: &str,
+        expected_prefixes: &[&str],
+        timeout: Duration,
+    ) -> Result<String, HWIError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        // Set the oneshot BEFORE sending the command.  If the background
+        // reader is currently holding the transport Mutex in recv_line,
+        // our send will block on that Mutex.  By the time we acquire it
+        // and the write completes, the reader may have already read
+        // a line — with the oneshot already set, that line gets routed
+        // to us instead of being lost.
+        let mut rx = {
+            let (tx, rx) = oneshot::channel();
+            let mut guard = self.hwi_response.lock().await;
+            *guard = Some(tx);
+            rx
+        };
+
+        self.transport
+            .send(command)
+            .await
+            .map_err(|e| HWIError::Device(e.to_string()))?;
+
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                let mut guard = self.hwi_response.lock().await;
+                *guard = None;
+                return Err(HWIError::Device(
+                    "timed out waiting for device response".to_string(),
+                ));
+            }
+
+            let line = tokio::time::timeout(remaining, rx)
+                .await
+                .map_err(|_| {
+                    HWIError::Device("timed out waiting for device response".to_string())
+                })?
+                .map_err(|_| HWIError::Device("transport session closed".to_string()))?;
+
+            for prefix in expected_prefixes {
+                if line.starts_with(prefix) {
+                    return Ok(line);
+                }
+            }
+
+            // An unexpected line arrived — could be a device-initiated
+            // message that was buffered.  Handle it and set a fresh
+            // oneshot for the next expected response.
+            if let Some(bp) = &self.balance_provider {
+                if let Some(addr) = line.strip_prefix("BALANCE_REQUEST:") {
+                    handle_balance_request(&self.transport, bp.as_ref(), addr).await;
+                } else if let Some(addr) = line.strip_prefix("TX_HISTORY:") {
+                    handle_tx_history_request(&self.transport, bp.as_ref(), addr).await;
+                }
+            } else {
+                debug!(
+                    "CoinCube: unexpected response in send_and_wait: {:?}",
+                    line
+                );
+            }
+
+            // Re-arm the oneshot for the next line.
+            let (tx, next_rx) = oneshot::channel();
+            {
+                let mut guard = self.hwi_response.lock().await;
+                *guard = Some(tx);
+            }
+            rx = next_rx;
+        }
+    }
+}
+
+async fn reader_loop<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    session: Arc<CoinCubeSession<T>>,
+    mut cancel_rx: watch::Receiver<bool>,
+) {
+    loop {
+        let line = tokio::select! {
+            _ = cancel_rx.changed() => break,
+            result = session.transport.recv_line(SESSION_READ_TIMEOUT) => {
+                match result {
+                    Ok(line) => line,
+                    Err(_) => continue,
+                }
+            }
+        };
+
+        let response_tx = {
+            let mut guard = session.hwi_response.lock().await;
+            guard.take()
+        };
+
+        if let Some(sender) = response_tx {
+            let _ = sender.send(line);
+            continue;
+        }
+
+        if let Some(bp) = &session.balance_provider {
+            if let Some(addr) = line.strip_prefix("BALANCE_REQUEST:") {
+                handle_balance_request(&session.transport, bp.as_ref(), addr).await;
+                continue;
+            }
+            if let Some(addr) = line.strip_prefix("TX_HISTORY:") {
+                handle_tx_history_request(&session.transport, bp.as_ref(), addr).await;
+                continue;
+            }
+        }
+
+        debug!("CoinCube session: unhandled line: {:?}", line);
+    }
+}
+
+async fn handle_balance_request<T: AsyncRead + AsyncWrite + Unpin + Send>(
+    transport: &GenericCoinCubeTransport<T>,
+    bp: &(dyn BalanceProvider + Send + Sync),
+    address: &str,
+) {
+    match tokio::time::timeout(DEVICE_REQUEST_TIMEOUT, bp.get_balance(address)).await {
+        Ok(Ok((confirmed, unconfirmed))) => {
+            let resp = format!("BALANCE:{}:{}", confirmed, unconfirmed);
+            if let Err(e) = transport.send(&resp).await {
+                warn!("CoinCube: failed to send balance response: {}", e);
+            }
+        }
+        Ok(Err(e)) => warn!("CoinCube: balance query failed for {}: {}", address, e),
+        Err(_) => warn!("CoinCube: balance query timed out for {}", address),
+    }
+}
+
+async fn handle_tx_history_request<T: AsyncRead + AsyncWrite + Unpin + Send>(
+    transport: &GenericCoinCubeTransport<T>,
+    bp: &(dyn BalanceProvider + Send + Sync),
+    address: &str,
+) {
+    match tokio::time::timeout(DEVICE_REQUEST_TIMEOUT, bp.get_history(address)).await {
+        Ok(Ok(entries)) => {
+            for entry in entries {
+                let resp = format!(
+                    "TX:{}:{}:{}:{}",
+                    entry.txid, entry.direction, entry.amount, entry.confirms
+                );
+                if let Err(e) = transport.send(&resp).await {
+                    warn!("CoinCube: failed to send TX entry: {}", e);
+                    break;
+                }
+            }
+        }
+        Ok(Err(e)) => warn!("CoinCube: TX history query failed for {}: {}", address, e),
+        Err(_) => warn!("CoinCube: TX history query timed out for {}", address),
+    }
+}
+
 // ─── Device info parsed from READY message ───────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -303,6 +610,7 @@ fn parse_ready(line: &str) -> Option<CoinCubeInfo> {
 pub struct CoinCubeDevice {
     port: String,
     transport: Arc<CoinCubeTransport>,
+    session: Arc<CoinCubeSession>,
     fingerprint: Fingerprint,
     version: Version,
     account_xpub: Xpub,
@@ -319,6 +627,12 @@ impl std::fmt::Debug for CoinCubeDevice {
     }
 }
 
+impl Drop for CoinCubeDevice {
+    fn drop(&mut self) {
+        self.session.cancel();
+    }
+}
+
 impl CoinCubeDevice {
     /// Open a CoinCube device on the given serial port.
     ///
@@ -326,6 +640,10 @@ impl CoinCubeDevice {
     /// If the device responds with bare `READY` (legacy firmware), falls back
     /// by querying `GET_XPUB:m/84'/0'/0'` to derive fingerprint and xpub info.
     /// Returns `Err(HWIError::DeviceNotFound)` if the port times out.
+    ///
+    /// After the handshake, spawns a background session task that handles
+    /// device-initiated messages (BALANCE_REQUEST, TX_HISTORY) between
+    /// HWI operations.
     pub async fn new(port_path: &str) -> Result<Self, HWIError> {
         let transport =
             CoinCubeTransport::open(port_path).map_err(|e| HWIError::Device(e.to_string()))?;
@@ -354,9 +672,60 @@ impl CoinCubeDevice {
             }
         };
 
+        let transport_arc = Arc::new(transport);
+        let session = CoinCubeSession::spawn(transport_arc.clone(), None);
+
         Ok(Self {
             port: port_path.to_string(),
-            transport: Arc::new(transport),
+            transport: transport_arc,
+            session,
+            fingerprint: info.fingerprint,
+            version: info.version,
+            account_xpub: info.account_xpub,
+        })
+    }
+
+    /// Open a CoinCube device and immediately start the session with a
+    /// balance provider for handling device-initiated queries.
+    pub async fn new_with_balance_provider(
+        port_path: &str,
+        balance_provider: Arc<dyn BalanceProvider + Send + Sync>,
+    ) -> Result<Self, HWIError> {
+        let transport =
+            CoinCubeTransport::open(port_path).map_err(|e| HWIError::Device(e.to_string()))?;
+
+        let _ = transport.send("GET_INFO").await;
+
+        let info = loop {
+            let line = transport
+                .recv_line(HANDSHAKE_TIMEOUT)
+                .await
+                .map_err(|_| HWIError::DeviceNotFound)?;
+
+            debug!("CoinCube handshake line: {:?}", line);
+
+            if line.starts_with("READY:") {
+                match parse_ready(&line) {
+                    Some(i) => break i,
+                    None => {
+                        warn!("CoinCube: malformed READY line: {:?}", line);
+                        return Err(HWIError::Device("malformed READY response".to_string()));
+                    }
+                }
+            } else if line == "READY" {
+                info!("CoinCube: legacy firmware detected (bare READY), falling back to GET_XPUB");
+                break legacy_handshake(&transport).await?;
+            }
+        };
+
+        let transport_arc = Arc::new(transport);
+        let session =
+            CoinCubeSession::spawn(transport_arc.clone(), Some(balance_provider));
+
+        Ok(Self {
+            port: port_path.to_string(),
+            transport: transport_arc,
+            session,
             fingerprint: info.fingerprint,
             version: info.version,
             account_xpub: info.account_xpub,
@@ -374,7 +743,6 @@ impl CoinCubeDevice {
             .into_iter()
             .filter(|p| match &p.port_type {
                 tokio_serial::SerialPortType::UsbPort(info) => {
-                    // Match our VID+PID or fall back to description substring.
                     (info.vid == COINCUBE_USB_VID && info.pid == COINCUBE_USB_PID)
                         || info
                             .product
@@ -396,41 +764,8 @@ impl CoinCubeDevice {
         format!("coincube-{}", self.port)
     }
 
-    /// Wait for one of the given prefixes, ignoring out-of-band device messages.
-    ///
-    /// Returns the full line when a match is found, or a timeout/error.
-    async fn wait_for(&self, prefixes: &[&str], timeout: Duration) -> Result<String, HWIError> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let remaining = deadline
-                .checked_duration_since(tokio::time::Instant::now())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                return Err(HWIError::Device("timed out waiting for device".to_string()));
-            }
-            let line = self
-                .transport
-                .recv_line(remaining)
-                .await
-                .map_err(|e| HWIError::Device(e.to_string()))?;
-
-            // Handle device-initiated out-of-band messages silently.
-            if line.starts_with("BALANCE_REQUEST:") || line.starts_with("TX_HISTORY:") {
-                debug!(
-                    "CoinCube: out-of-band message (unhandled in HWI path): {:?}",
-                    line
-                );
-                continue;
-            }
-
-            for prefix in prefixes {
-                if line.starts_with(prefix) {
-                    return Ok(line);
-                }
-            }
-
-            debug!("CoinCube: ignoring unexpected line: {:?}", line);
-        }
+    pub fn transport(&self) -> &Arc<CoinCubeTransport> {
+        &self.transport
     }
 }
 
@@ -473,36 +808,28 @@ async fn legacy_handshake(transport: &CoinCubeTransport) -> Result<CoinCubeInfo,
 
 #[async_trait]
 impl HWI for CoinCubeDevice {
-    /// Return the device kind.
-    ///
-    /// Uses `DeviceKind::Specter` as a proxy until async_hwi adds a CoinCube
-    /// variant. The UI layer identifies CoinCube devices by their id prefix
-    /// `"coincube-"` and renders the correct label/icon regardless.
     fn device_kind(&self) -> DeviceKind {
         DeviceKind::Specter
     }
 
-    /// Firmware version parsed from the READY handshake.
     async fn get_version(&self) -> Result<Version, HWIError> {
         Ok(self.version.clone())
     }
 
-    /// Master key fingerprint parsed from the READY handshake.
     async fn get_master_fingerprint(&self) -> Result<Fingerprint, HWIError> {
         Ok(self.fingerprint)
     }
 
-    /// Request the xpub at an arbitrary derivation path.
-    ///
-    /// Sends `GET_XPUB:<path>` and waits for `XPUB:<base58check>`.
     async fn get_extended_pubkey(&self, path: &DerivationPath) -> Result<Xpub, HWIError> {
         let path_str = path.to_string();
-        self.transport
-            .send(&format!("GET_XPUB:{}", path_str))
-            .await
-            .map_err(|e| HWIError::Device(e.to_string()))?;
-
-        let line = self.wait_for(&["XPUB:", "ERROR:"], QUERY_TIMEOUT).await?;
+        let line = self
+            .session
+            .send_and_wait(
+                &format!("GET_XPUB:{}", path_str),
+                &["XPUB:", "ERROR:"],
+                QUERY_TIMEOUT,
+            )
+            .await?;
 
         if let Some(xpub_str) = line.strip_prefix("XPUB:") {
             Xpub::from_str(xpub_str).map_err(|e| HWIError::Device(e.to_string()))
@@ -514,9 +841,6 @@ impl HWI for CoinCubeDevice {
         }
     }
 
-    /// Register a wallet policy on the device.
-    ///
-    /// Not supported by CoinCube firmware (BTC-only, no multi-policy registry).
     async fn register_wallet(
         &self,
         _name: &str,
@@ -525,16 +849,10 @@ impl HWI for CoinCubeDevice {
         Err(HWIError::UnimplementedMethod)
     }
 
-    /// Check if a wallet policy is registered.
-    ///
-    /// Always returns `false` — CoinCube has no wallet registry.
     async fn is_wallet_registered(&self, _name: &str, _policy: &str) -> Result<bool, HWIError> {
         Ok(false)
     }
 
-    /// Ask device to display an address and wait for user confirmation.
-    ///
-    /// Sends `VERIFY:<address>` and waits for `VERIFIED` or `MISMATCH`.
     async fn display_address(&self, script: &AddressScript) -> Result<(), HWIError> {
         let address = match script {
             AddressScript::Miniscript { index, change } => {
@@ -547,13 +865,13 @@ impl HWI for CoinCubeDevice {
             }
         };
 
-        self.transport
-            .send(&format!("VERIFY:{}", address))
-            .await
-            .map_err(|e| HWIError::Device(e.to_string()))?;
-
         let line = self
-            .wait_for(&["VERIFIED", "MISMATCH", "ERROR:"], QUERY_TIMEOUT)
+            .session
+            .send_and_wait(
+                &format!("VERIFY:{}", address),
+                &["VERIFIED", "MISMATCH", "ERROR:"],
+                QUERY_TIMEOUT,
+            )
             .await?;
 
         if line == "VERIFIED" {
@@ -567,22 +885,17 @@ impl HWI for CoinCubeDevice {
         }
     }
 
-    /// Send a PSBT to the device for user review and signing.
-    ///
-    /// Protocol: `PSBT:<base64>` → wait for `SIGNED:<base64>` or `REJECTED`.
-    /// The user has up to `SIGN_TIMEOUT` (120 s) to confirm on-device.
     async fn sign_tx(&self, tx: &mut Psbt) -> Result<(), HWIError> {
-        // Serialize and base64-encode the PSBT.
         let raw = tx.serialize();
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &raw);
 
-        self.transport
-            .send(&format!("PSBT:{}", b64))
-            .await
-            .map_err(|e| HWIError::Device(e.to_string()))?;
-
         let line = self
-            .wait_for(&["SIGNED:", "REJECTED", "ERROR:"], SIGN_TIMEOUT)
+            .session
+            .send_and_wait(
+                &format!("PSBT:{}", b64),
+                &["SIGNED:", "REJECTED", "ERROR:"],
+                SIGN_TIMEOUT,
+            )
             .await?;
 
         if let Some(b64_signed) = line.strip_prefix("SIGNED:") {
@@ -591,8 +904,6 @@ impl HWI for CoinCubeDevice {
                     .map_err(|e| HWIError::Device(e.to_string()))?;
             let signed_psbt =
                 Psbt::deserialize(&signed_raw).map_err(|e| HWIError::Device(e.to_string()))?;
-            // Merge the signed inputs back into the caller's PSBT.
-            // The device returns a complete updated PSBT; we replace in-place.
             *tx = signed_psbt;
             Ok(())
         } else if line == "REJECTED" {
@@ -674,6 +985,216 @@ mod tests {
         assert!(
             parse_ready(bare).is_none(),
             "bare format should return None for fallback"
+        );
+    }
+
+    // ─── CoinCubeSession tests ────────────────────────────────────────────
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    struct MockBalanceProvider {
+        balance: (u64, u64),
+        history: Vec<TxHistoryEntry>,
+    }
+
+    #[async_trait]
+    impl BalanceProvider for MockBalanceProvider {
+        async fn get_balance(&self, _address: &str) -> Result<(u64, u64), String> {
+            Ok(self.balance)
+        }
+
+        async fn get_history(&self, _address: &str) -> Result<Vec<TxHistoryEntry>, String> {
+            Ok(self.history.clone())
+        }
+    }
+
+    fn mock_session(
+        bp: Option<MockBalanceProvider>,
+    ) -> (
+        Arc<CoinCubeSession<DuplexStream>>,
+        DuplexStream,
+    ) {
+        let (local, remote) = tokio::io::duplex(4096);
+        let transport =
+            Arc::new(GenericCoinCubeTransport::<DuplexStream>::with_stream(
+                "mock", local,
+            ));
+        let bp: Option<Arc<dyn BalanceProvider + Send + Sync>> =
+            bp.map(|p| Arc::new(p) as Arc<dyn BalanceProvider + Send + Sync>);
+        let session = CoinCubeSession::<DuplexStream>::spawn(transport, bp);
+        (session, remote)
+    }
+
+    #[tokio::test]
+    async fn test_session_balance_request_handled() {
+        let (session, mut device_side) = mock_session(Some(MockBalanceProvider {
+            balance: (100_000, 5_000),
+            history: vec![],
+        }));
+
+        device_side
+            .write_all(b"BALANCE_REQUEST:bc1qtest\n")
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut buf = [0u8; 256];
+        let n = tokio::time::timeout(Duration::from_millis(500), device_side.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let output = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            output.contains("BALANCE:100000:5000"),
+            "should respond with balance, got: {}",
+            output
+        );
+
+        // Spawn the response write on a short delay so send_and_wait
+        // has time to set up its oneshot before the line arrives.
+        let device_side = Arc::new(tokio::sync::Mutex::new(device_side));
+        let ds = device_side.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            ds.lock()
+                .await
+                .write_all(b"XPUB:xpub6TestKey\n")
+                .await
+                .unwrap();
+        });
+
+        let result = session
+            .send_and_wait("GET_XPUB:test", &["XPUB:"], Duration::from_secs(2))
+            .await;
+        assert!(result.is_ok(), "HWI routing should work after balance request");
+    }
+
+    #[tokio::test]
+    async fn test_session_tx_history_request_handled() {
+        let (session, mut device_side) = mock_session(Some(MockBalanceProvider {
+            balance: (0, 0),
+            history: vec![
+                TxHistoryEntry {
+                    txid: "abc123".to_string(),
+                    direction: "in".to_string(),
+                    amount: 50_000,
+                    confirms: 3,
+                },
+                TxHistoryEntry {
+                    txid: "def456".to_string(),
+                    direction: "out".to_string(),
+                    amount: 30_000,
+                    confirms: 10,
+                },
+            ],
+        }));
+
+        device_side
+            .write_all(b"TX_HISTORY:bc1qtest\n")
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut buf = [0u8; 512];
+        let n = tokio::time::timeout(Duration::from_millis(500), device_side.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let output = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            output.contains("TX:abc123:in:50000:3"),
+            "should send TX entry for abc123, got: {}",
+            output
+        );
+        assert!(
+            output.contains("TX:def456:out:30000:10"),
+            "should send TX entry for def456, got: {}",
+            output
+        );
+        drop(session);
+    }
+
+    #[tokio::test]
+    async fn test_session_shutdown_on_cancel() {
+        let (session, _device_side) = mock_session(None);
+
+        session.cancel();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let result = session
+            .send_and_wait("TEST", &["RESPONSE:"], Duration::from_millis(200))
+            .await;
+        assert!(result.is_err(), "send_and_wait should fail after session cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_session_without_balance_provider_ignores_requests() {
+        let (session, mut device_side) = mock_session(None);
+
+        device_side
+            .write_all(b"BALANCE_REQUEST:bc1qtest\n")
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Spawn the response on a delay so send_and_wait sets up its
+        // oneshot before the background reader consumes the line.
+        let device_side = Arc::new(tokio::sync::Mutex::new(device_side));
+        let ds = device_side.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            ds.lock()
+                .await
+                .write_all(b"VERIFIED\n")
+                .await
+                .unwrap();
+        });
+
+        let result = session
+            .send_and_wait("VERIFY:addr", &["VERIFIED"], Duration::from_secs(2))
+            .await;
+        assert!(result.is_ok(), "HWI routing should work without balance provider");
+    }
+
+    #[tokio::test]
+    async fn test_session_send_and_wait_routing() {
+        let (session, mut device_side) = mock_session(None);
+
+        device_side
+            .write_all(b"SIGNED:deadbeef\n")
+            .await
+            .unwrap();
+
+        let result = session
+            .send_and_wait("PSBT:test", &["SIGNED:"], Duration::from_secs(1))
+            .await;
+        assert!(result.is_ok(), "send_and_wait should receive SIGNED response");
+        let line = result.unwrap();
+        assert!(
+            line.starts_with("SIGNED:"),
+            "expected SIGNED: prefix, got: {}",
+            line
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_send_and_wait_timeout() {
+        let (session, _device_side) = mock_session(None);
+
+        let result = session
+            .send_and_wait("GET_XPUB:test", &["XPUB:"], Duration::from_millis(50))
+            .await;
+        assert!(
+            result.is_err(),
+            "send_and_wait should timeout when no response arrives"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, HWIError::Device(_)),
+            "timeout should return HWIError::Device"
         );
     }
 }
