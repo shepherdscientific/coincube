@@ -6,6 +6,7 @@ use std::{
 
 use crate::{
     app::{settings, wallet::Wallet},
+    coincube_hw::CoinCubeDevice,
     dir::CoincubeDirectory,
 };
 use async_hwi::{
@@ -534,6 +535,42 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
             }
             Err(e) => warn!("Error while listing jade devices: {}", e),
         }
+
+        // ── CoinCube hardware wallet (USB CDC serial) ─────────────────────
+        match CoinCubeDevice::enumerate_ports() {
+            Ok(ports) => {
+                for port in ports {
+                    let id = format!("coincube-{}", port);
+                    if state.connected_supported_hws.contains(&id) {
+                        still.push(id);
+                    } else {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            CoinCubeDevice::new(&port),
+                        )
+                        .await
+                        {
+                            Ok(Ok(device)) => {
+                                match HardwareWallet::new(
+                                    id,
+                                    Arc::new(device),
+                                    Some(&state.keys_aliases),
+                                )
+                                .await
+                                {
+                                    Ok(hw) => hws.push(hw),
+                                    Err(e) => debug!("CoinCube HWI init failed: {}", e),
+                                }
+                            }
+                            Ok(Err(e)) => debug!("CoinCube connect failed: {}", e),
+                            Err(_) => debug!("CoinCube handshake timed out on {}", port),
+                        }
+                    }
+                }
+            }
+            Err(e) => debug!("CoinCube port enumeration failed: {}", e),
+        }
+
 
         match ledger::LedgerSimulator::try_connect().await {
             Ok(device) => {

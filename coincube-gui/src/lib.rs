@@ -8,6 +8,7 @@ pub mod export;
 pub mod feature_flags;
 pub mod gui;
 pub mod help;
+pub mod coincube_hw;
 pub mod hw;
 pub mod installer;
 pub mod launcher;

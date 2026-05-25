@@ -1,0 +1,62 @@
+{
+  "project": "coincube-desktop HW wallet integration",
+  "description": "Integrate the CoinCube hardware wallet into the coincube Rust desktop app via USB CDC serial protocol. The device already implements PSBT signing, address verification, and balance/TX history push over a line-based ASCII/base64 serial protocol (serial_transport.h). This prd covers the Rust host-side adapter, protocol extensions needed, and UI wiring.",
+  "userStories": [
+    {
+      "id": "US-HW-001",
+      "description": "Extend READY message to include device info. Currently serial_send_ready() sends only 'READY\\n'. Extend firmware to send 'READY:<fingerprint_hex>:<version_str>:<xpub_m84_base58>\\n' so the desktop can identify the device and cache master fingerprint and account xpub without extra round-trips. Also add 'GET_XPUB:<path>\\n' command (host→device) and 'XPUB:<base58>\\n' response (device→host) for arbitrary derivation paths. Acceptance criteria: (1) wallet1.ino calls serial_send_ready_with_info(fingerprint, version, xpub) after SE init; (2) desktop parses all three fields; (3) unit test in test_serial_transport.cpp validates the parse path; (4) backward-compat: if host sees bare 'READY', it falls back gracefully.",
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-HW-002",
+      "description": "Implement CoinCubeTransport — serial port I/O layer. Wraps tokio::io over a serialport (tokio-serial). Responsibilities: open port at 115200 8N1, write a newline-terminated command, read lines with a configurable timeout (default 10 s for signing, 3 s for info queries). Expose: `send(&str) -> Result<(), Error>` and `recv_line(timeout: Duration) -> Result<String, Error>`. Use a Mutex<BufReader<SerialStream>> internally so CoinCubeDevice can be Sync. Acceptance criteria: (1) compiles against tokio-serial 5.x; (2) unit tests with mock transport; (3) timeout returns Error::Timeout after deadline.",
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-HW-003",
+      "description": "Implement CoinCubeDevice struct with serial port enumeration. enumerate_ports() returns Vec<String> of candidate port paths, filtered by device description substring 'CoinCube' or by USB VID 0x303A (Espressif CDC) / PID 0x4001 (or fallback: any port responding to GET_INFO with 'READY:'). new(port_path: String) opens the port, sends 'GET_INFO\\n' (or waits for READY), parses fingerprint+version+xpub from the response, stores them. Acceptance criteria: (1) enumerate_ports() compiles on macOS, Linux, Windows; (2) new() returns Err(DeviceNotFound) if port does not respond in 3 s; (3) struct fields: port, fingerprint: Fingerprint, version: Version, account_xpub: Xpub.",
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-HW-004",
+      "description": "Implement async_hwi::HWI trait for CoinCubeDevice. Required methods: (1) device_kind() -> DeviceKind::Specter (temporary until upstream adds CoinCube variant); (2) get_version() -> Version parsed from READY; (3) get_master_fingerprint() -> Fingerprint parsed from READY; (4) get_extended_pubkey(path) -> send GET_XPUB:<path>, parse XPUB: response, return Xpub; (5) sign_tx(psbt) -> base64-encode psbt, send PSBT:<b64>, wait for SIGNED:<b64> (return Ok) or REJECTED (return Err(UserRefused)) or ERROR:<n> (return Err); (6) display_address(script) -> send VERIFY:<address>, wait for VERIFIED (Ok) or MISMATCH (Err); (7) register_wallet() -> Err(Error::UnsupportedMethod) — firmware has no wallet-policy registry; (8) is_wallet_registered() -> Ok(false). Acceptance criteria: all 8 methods compile; sign_tx round-trip tested with a pre-built test PSBT.",
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-HW-005",
+      "description": "Integrate CoinCubeDevice into the hw.rs refresh loop. In the refresh() stream, after checking Jade serial ports, add a CoinCube enumeration block: call CoinCubeDevice::enumerate_ports(), for each port compute id = format!('coincube-{}', port), skip if already in connected_supported_hws, call CoinCubeDevice::new(port) with a 3 s timeout, on success call HardwareWallet::new(id, Arc::new(device), keys_aliases). Add DEVICES_COMPATIBLE_WITH_TAPMINISCRIPT entry for DeviceKind::Specter (already present) so tapminiscript-aware wallets work. Also handle disconnection: if the port vanishes, the next refresh poll will fail to open it and the device drops from still list. Acceptance criteria: (1) connecting CoinCube USB-C adds it to hw list within 4 s; (2) disconnecting removes it within 6 s; (3) no compile errors on all three platforms.",
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-HW-006",
+      "description": "Implement balance and TX history push (device-initiated). The CoinCube firmware can send BALANCE_REQUEST:<address> and TX_HISTORY:<address> to poll the host for on-chain data. The desktop should handle these out-of-band messages during the active session. Add a CoinCubeSession struct (or extend CoinCubeDevice) that spawns a background task listening for device-initiated messages, dispatches BALANCE_REQUEST to an Electrum/Esplora query, and sends back BALANCE:<conf>:<unconf>\\n and TX:<txid>:<dir>:<amount>:<confirms>\\n entries. Acceptance criteria: (1) BALANCE_REQUEST triggers a network query; (2) response sent within 30 s timeout; (3) multiple TX entries sent sequentially; (4) background task terminates cleanly when CoinCubeDevice is dropped.",
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-HW-007",
+      "description": "UI: device-kind label and icon for CoinCube. In the coincube-gui UI layer, check if device id starts with 'coincube-' and display 'CoinCube' as the device name regardless of DeviceKind variant. Add a CoinCube SVG icon to assets. Show firmware version in the device row. Acceptance criteria: (1) connected CoinCube shows 'CoinCube' label; (2) icon renders at 32x32; (3) Specter devices still show 'Specter' label.",
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-HW-008",
+      "description": "Integration test: full PSBT signing round-trip in simulation mode. In test mode (no real device), instantiate a CoinCubeSimulator that replays the serial protocol via a Unix socket / pipe pair. Test: (1) enumerate finds the simulated port; (2) READY response with test fingerprint/xpub is parsed; (3) send a valid P2WPKH PSBT; (4) simulator auto-signs and responds SIGNED; (5) returned PSBT has non-empty partial_sigs. Run with: cargo test -p coincube-gui -- coincube_hw. Acceptance criteria: test passes in CI without a physical device.",
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

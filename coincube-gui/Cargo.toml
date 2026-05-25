@@ -28,6 +28,7 @@ coincubed = { path = "../coincubed", default-features = false, features = [
 coincube-ui = { path = "../coincube-ui" }
 backtrace = "0.3"
 hex = "0.4.3"
+tokio-serial = "5.4"
 
 iced = { version = "0.14.0", default-features = false, features = [
 	"tokio",
