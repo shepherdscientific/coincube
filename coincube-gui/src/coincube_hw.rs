@@ -58,7 +58,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod transport {
     use super::*;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
     use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
     #[derive(Debug)]
@@ -86,14 +86,21 @@ pub mod transport {
         }
     }
 
-    /// Bidirectional line-oriented transport over a tokio-serial port.
-    pub struct CoinCubeTransport {
+    /// Concrete transport for serial port I/O.
+    pub type CoinCubeTransport = GenericCoinCubeTransport<SerialStream>;
+
+    /// Bidirectional line-oriented transport over an async read/write stream.
+    ///
+    /// Wraps a `BufReader<T>` behind a `tokio::sync::Mutex` so the containing
+    /// `CoinCubeDevice` can be `Sync`.  The concrete alias `CoinCubeTransport`
+    /// uses `SerialStream` (tokio-serial 5.x); tests inject `DuplexStream`.
+    pub struct GenericCoinCubeTransport<T> {
         port_path: String,
-        inner: Mutex<TransportInner>,
+        inner: Mutex<TransportInner<T>>,
     }
 
-    struct TransportInner {
-        reader: BufReader<SerialStream>,
+    struct TransportInner<T> {
+        reader: BufReader<T>,
     }
 
     impl CoinCubeTransport {
@@ -105,11 +112,19 @@ pub mod transport {
                 .parity(tokio_serial::Parity::None)
                 .open_native_async()
                 .map_err(TransportError::Serial)?;
-            let reader = BufReader::new(port);
-            Ok(Self {
+            Ok(Self::with_stream(port_path, port))
+        }
+    }
+
+    impl<T: AsyncRead + AsyncWrite + Unpin + Send> GenericCoinCubeTransport<T> {
+        /// Create a transport wrapping an arbitrary bidirectional stream.
+        pub fn with_stream(port_path: &str, stream: T) -> Self {
+            Self {
                 port_path: port_path.to_string(),
-                inner: Mutex::new(TransportInner { reader }),
-            })
+                inner: Mutex::new(TransportInner {
+                    reader: BufReader::new(stream),
+                }),
+            }
         }
 
         pub fn port_path(&self) -> &str {
@@ -147,9 +162,91 @@ pub mod transport {
         }
     }
 
-    impl std::fmt::Debug for CoinCubeTransport {
+    impl<T> std::fmt::Debug for GenericCoinCubeTransport<T> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "CoinCubeTransport({})", self.port_path)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        #[tokio::test]
+        async fn test_send_writes_newline_terminated_command() {
+            let (local, mut remote) = tokio::io::duplex(256);
+            let transport = GenericCoinCubeTransport::with_stream("mock", local);
+
+            transport.send("GET_INFO").await.unwrap();
+
+            let mut buf = [0u8; 64];
+            let n = remote.read(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"GET_INFO\n");
+        }
+
+        #[tokio::test]
+        async fn test_recv_line_reads_response() {
+            let (mut local, remote) = tokio::io::duplex(256);
+            let transport = GenericCoinCubeTransport::with_stream("mock", remote);
+
+            local.write_all(b"READY:aabbccdd:1.0.0:xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL\n").await.unwrap();
+
+            let resp = transport
+                .recv_line(Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert!(resp.starts_with("READY:"));
+        }
+
+        #[tokio::test]
+        async fn test_recv_line_strips_trailing_crlf() {
+            let (mut local, remote) = tokio::io::duplex(256);
+            let transport = GenericCoinCubeTransport::with_stream("mock", remote);
+
+            local.write_all(b"VERIFIED\r\n").await.unwrap();
+
+            let resp = transport
+                .recv_line(Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert_eq!(resp, "VERIFIED");
+        }
+
+        #[tokio::test]
+        async fn test_recv_line_timeout_returns_timeout_error() {
+            let (local, _remote) = tokio::io::duplex(256);
+            let transport = GenericCoinCubeTransport::with_stream("mock", local);
+
+            let result = transport.recv_line(Duration::from_millis(10)).await;
+
+            assert!(matches!(result, Err(TransportError::Timeout)));
+        }
+
+        #[tokio::test]
+        async fn test_send_recv_roundtrip() {
+            let (mut device_side, transport_side) = tokio::io::duplex(256);
+            let transport = GenericCoinCubeTransport::with_stream("mock", transport_side);
+
+            transport.send("GET_XPUB:m/84'/0'/0'").await.unwrap();
+
+            let mut buf = [0u8; 128];
+            let n = device_side.read(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"GET_XPUB:m/84'/0'/0'\n");
+
+            let xpub_str = "xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL";
+            device_side
+                .write_all(format!("XPUB:{}\n", xpub_str).as_bytes())
+                .await
+                .unwrap();
+
+            let resp = transport
+                .recv_line(Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert!(resp.starts_with("XPUB:"));
+            assert!(resp.contains(xpub_str));
         }
     }
 }
