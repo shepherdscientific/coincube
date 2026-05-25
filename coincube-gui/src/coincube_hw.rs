@@ -52,7 +52,7 @@ const SIGN_TIMEOUT: Duration = Duration::from_secs(120);
 /// Timeout for info queries (fingerprint, xpub, address verify).
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for initial handshake / READY detection.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 
 // ─── Transport layer ──────────────────────────────────────────────────────────
 
@@ -301,8 +301,11 @@ fn parse_ready(line: &str) -> Option<CoinCubeInfo> {
 
 /// A connected CoinCube hardware wallet, ready for HWI operations.
 pub struct CoinCubeDevice {
+    port: String,
     transport: Arc<CoinCubeTransport>,
-    info: CoinCubeInfo,
+    fingerprint: Fingerprint,
+    version: Version,
+    account_xpub: Xpub,
 }
 
 impl std::fmt::Debug for CoinCubeDevice {
@@ -310,8 +313,8 @@ impl std::fmt::Debug for CoinCubeDevice {
         write!(
             f,
             "CoinCubeDevice({}, fg={})",
-            self.transport.port_path(),
-            self.info.fingerprint
+            self.port,
+            self.fingerprint
         )
     }
 }
@@ -352,8 +355,11 @@ impl CoinCubeDevice {
         };
 
         Ok(Self {
+            port: port_path.to_string(),
             transport: Arc::new(transport),
-            info,
+            fingerprint: info.fingerprint,
+            version: info.version,
+            account_xpub: info.account_xpub,
         })
     }
 
@@ -368,8 +374,8 @@ impl CoinCubeDevice {
             .into_iter()
             .filter(|p| match &p.port_type {
                 tokio_serial::SerialPortType::UsbPort(info) => {
-                    // Match our VID or fall back to description substring.
-                    info.vid == COINCUBE_USB_VID
+                    // Match our VID+PID or fall back to description substring.
+                    (info.vid == COINCUBE_USB_VID && info.pid == COINCUBE_USB_PID)
                         || info
                             .product
                             .as_deref()
@@ -387,7 +393,7 @@ impl CoinCubeDevice {
 
     /// Unique device ID string for use as the `HardwareWallet` id.
     pub fn device_id(&self) -> String {
-        format!("coincube-{}", self.transport.port_path())
+        format!("coincube-{}", self.port)
     }
 
     /// Wait for one of the given prefixes, ignoring out-of-band device messages.
@@ -478,12 +484,12 @@ impl HWI for CoinCubeDevice {
 
     /// Firmware version parsed from the READY handshake.
     async fn get_version(&self) -> Result<Version, HWIError> {
-        Ok(self.info.version.clone())
+        Ok(self.version.clone())
     }
 
     /// Master key fingerprint parsed from the READY handshake.
     async fn get_master_fingerprint(&self) -> Result<Fingerprint, HWIError> {
-        Ok(self.info.fingerprint)
+        Ok(self.fingerprint)
     }
 
     /// Request the xpub at an arbitrary derivation path.
