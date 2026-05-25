@@ -31,12 +31,9 @@ use coincube_core::miniscript::bitcoin::{
     bip32::{DerivationPath, Fingerprint, Xpub},
     psbt::Psbt,
 };
-use std::{
-    str::FromStr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
-use tracing::{debug, warn};
+use std::{str::FromStr, sync::Arc, time::Duration};
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 // ─── Re-exports for hw.rs integration ────────────────────────────────────────
 
@@ -92,13 +89,11 @@ pub mod transport {
     /// Bidirectional line-oriented transport over a tokio-serial port.
     pub struct CoinCubeTransport {
         port_path: String,
-        // Mutex so CoinCubeDevice can be Sync (HWI requires &self, not &mut self).
         inner: Mutex<TransportInner>,
     }
 
     struct TransportInner {
         reader: BufReader<SerialStream>,
-        port: SerialStream,
     }
 
     impl CoinCubeTransport {
@@ -110,16 +105,10 @@ pub mod transport {
                 .parity(tokio_serial::Parity::None)
                 .open_native_async()
                 .map_err(TransportError::Serial)?;
-            // Split into a write half and a BufReader for line reads.
-            // tokio_serial::SerialStream implements AsyncRead + AsyncWrite so we
-            // keep a single port handle but wrap the read side in BufReader.
-            // NOTE: We clone the file descriptor for the write half on Unix;
-            // on Windows SerialStream is Clone-able directly.
-            let port_cloned = port.try_clone_native().map_err(TransportError::Serial)?;
-            let reader = BufReader::new(port_cloned);
+            let reader = BufReader::new(port);
             Ok(Self {
                 port_path: port_path.to_string(),
-                inner: Mutex::new(TransportInner { reader, port }),
+                inner: Mutex::new(TransportInner { reader }),
             })
         }
 
@@ -129,10 +118,11 @@ pub mod transport {
 
         /// Send a newline-terminated command.
         pub async fn send(&self, cmd: &str) -> Result<(), TransportError> {
-            let mut guard = self.inner.lock().unwrap();
             let line = format!("{}\n", cmd);
+            let mut guard = self.inner.lock().await;
             guard
-                .port
+                .reader
+                .get_mut()
                 .write_all(line.as_bytes())
                 .await
                 .map_err(TransportError::Io)
@@ -142,7 +132,7 @@ pub mod transport {
         pub async fn recv_line(&self, timeout: Duration) -> Result<String, TransportError> {
             let mut buf = String::new();
             let fut = async {
-                let mut guard = self.inner.lock().unwrap();
+                let mut guard = self.inner.lock().await;
                 guard
                     .reader
                     .read_line(&mut buf)
@@ -233,15 +223,15 @@ impl CoinCubeDevice {
     /// Open a CoinCube device on the given serial port.
     ///
     /// Sends a `GET_INFO` nudge and waits for a `READY:…` response.
+    /// If the device responds with bare `READY` (legacy firmware), falls back
+    /// by querying `GET_XPUB:m/84'/0'/0'` to derive fingerprint and xpub info.
     /// Returns `Err(HWIError::DeviceNotFound)` if the port times out.
     pub async fn new(port_path: &str) -> Result<Self, HWIError> {
         let transport =
             CoinCubeTransport::open(port_path).map_err(|e| HWIError::Device(e.to_string()))?;
 
-        // Nudge the device — it may already be in READY state.
-        let _ = transport.send("GET_INFO").await; // ignore send error; read timeout handles it
+        let _ = transport.send("GET_INFO").await;
 
-        // Drain lines until we see READY: or timeout.
         let info = loop {
             let line = transport
                 .recv_line(HANDSHAKE_TIMEOUT)
@@ -255,13 +245,13 @@ impl CoinCubeDevice {
                     Some(i) => break i,
                     None => {
                         warn!("CoinCube: malformed READY line: {:?}", line);
-                        return Err(HWIError::Device(
-                            "malformed READY response".to_string(),
-                        ));
+                        return Err(HWIError::Device("malformed READY response".to_string()));
                     }
                 }
+            } else if line == "READY" {
+                info!("CoinCube: legacy firmware detected (bare READY), falling back to GET_XPUB");
+                break legacy_handshake(&transport).await?;
             }
-            // Ignore other messages (boot logs, etc.) and keep reading.
         };
 
         Ok(Self {
@@ -275,8 +265,7 @@ impl CoinCubeDevice {
     /// Filters by USB VID/PID where the OS provides it, then falls back
     /// to port description substring matching.
     pub fn enumerate_ports() -> Result<Vec<String>, HWIError> {
-        let ports = tokio_serial::available_ports()
-            .map_err(|e| HWIError::Device(e.to_string()))?;
+        let ports = tokio_serial::available_ports().map_err(|e| HWIError::Device(e.to_string()))?;
 
         let candidates: Vec<String> = ports
             .into_iter()
@@ -307,11 +296,7 @@ impl CoinCubeDevice {
     /// Wait for one of the given prefixes, ignoring out-of-band device messages.
     ///
     /// Returns the full line when a match is found, or a timeout/error.
-    async fn wait_for(
-        &self,
-        prefixes: &[&str],
-        timeout: Duration,
-    ) -> Result<String, HWIError> {
+    async fn wait_for(&self, prefixes: &[&str], timeout: Duration) -> Result<String, HWIError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline
@@ -328,7 +313,10 @@ impl CoinCubeDevice {
 
             // Handle device-initiated out-of-band messages silently.
             if line.starts_with("BALANCE_REQUEST:") || line.starts_with("TX_HISTORY:") {
-                debug!("CoinCube: out-of-band message (unhandled in HWI path): {:?}", line);
+                debug!(
+                    "CoinCube: out-of-band message (unhandled in HWI path): {:?}",
+                    line
+                );
                 continue;
             }
 
@@ -341,6 +329,41 @@ impl CoinCubeDevice {
             debug!("CoinCube: ignoring unexpected line: {:?}", line);
         }
     }
+}
+
+/// Handshake with a legacy CoinCube that only sends bare `READY`.
+///
+/// Falls back to sending `GET_XPUB:m/84'/0'/0'` to obtain the account xpub
+/// and derive the master fingerprint. Version is set to an unknown placeholder.
+async fn legacy_handshake(transport: &CoinCubeTransport) -> Result<CoinCubeInfo, HWIError> {
+    transport
+        .send("GET_XPUB:m/84'/0'/0'")
+        .await
+        .map_err(|e| HWIError::Device(e.to_string()))?;
+
+    let line = transport
+        .recv_line(QUERY_TIMEOUT)
+        .await
+        .map_err(|e| HWIError::Device(e.to_string()))?;
+
+    let xpub_str = line
+        .strip_prefix("XPUB:")
+        .ok_or_else(|| HWIError::Device("no XPUB response from legacy device".to_string()))?;
+
+    let account_xpub = Xpub::from_str(xpub_str).map_err(|e| HWIError::Device(e.to_string()))?;
+
+    let fingerprint = account_xpub.fingerprint();
+
+    Ok(CoinCubeInfo {
+        fingerprint,
+        version: Version {
+            major: 0,
+            minor: 0,
+            patch: 0,
+            prerelease: Some("legacy".to_string()),
+        },
+        account_xpub,
+    })
 }
 
 // ─── HWI trait implementation ─────────────────────────────────────────────────
@@ -376,9 +399,7 @@ impl HWI for CoinCubeDevice {
             .await
             .map_err(|e| HWIError::Device(e.to_string()))?;
 
-        let line = self
-            .wait_for(&["XPUB:", "ERROR:"], QUERY_TIMEOUT)
-            .await?;
+        let line = self.wait_for(&["XPUB:", "ERROR:"], QUERY_TIMEOUT).await?;
 
         if let Some(xpub_str) = line.strip_prefix("XPUB:") {
             Xpub::from_str(xpub_str).map_err(|e| HWIError::Device(e.to_string()))
@@ -398,7 +419,7 @@ impl HWI for CoinCubeDevice {
         _name: &str,
         _policy: &str,
     ) -> Result<Option<[u8; 32]>, HWIError> {
-        Err(HWIError::UnsupportedMethod)
+        Err(HWIError::UnimplementedMethod)
     }
 
     /// Check if a wallet policy is registered.
@@ -413,20 +434,13 @@ impl HWI for CoinCubeDevice {
     /// Sends `VERIFY:<address>` and waits for `VERIFIED` or `MISMATCH`.
     async fn display_address(&self, script: &AddressScript) -> Result<(), HWIError> {
         let address = match script {
-            AddressScript::P2WPKH(pk) => {
-                use coincube_core::miniscript::bitcoin::Address;
-                // Build address from pubkey — derive network from fingerprint context.
-                // TODO: pass network into CoinCubeDevice at construction time.
-                let addr = Address::p2wpkh(pk, coincube_core::miniscript::bitcoin::Network::Bitcoin);
-                addr.to_string()
-            }
             AddressScript::Miniscript { index, change } => {
-                // For miniscript/taproot, send the serialized script or derive address.
-                // The device will look up the address by index from its own key.
                 format!("index={},change={}", index, change)
             }
+            AddressScript::P2TR(path) => path.to_string(),
+            #[allow(unreachable_patterns)]
             _ => {
-                return Err(HWIError::UnsupportedMethod);
+                return Err(HWIError::UnimplementedMethod);
             }
         };
 
@@ -442,7 +456,9 @@ impl HWI for CoinCubeDevice {
         if line == "VERIFIED" {
             Ok(())
         } else if line == "MISMATCH" {
-            Err(HWIError::Device("address mismatch confirmed by user".to_string()))
+            Err(HWIError::Device(
+                "address mismatch confirmed by user".to_string(),
+            ))
         } else {
             Err(HWIError::Device(format!("device error: {}", line)))
         }
@@ -467,11 +483,9 @@ impl HWI for CoinCubeDevice {
             .await?;
 
         if let Some(b64_signed) = line.strip_prefix("SIGNED:") {
-            let signed_raw = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                b64_signed,
-            )
-            .map_err(|e| HWIError::Device(e.to_string()))?;
+            let signed_raw =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64_signed)
+                    .map_err(|e| HWIError::Device(e.to_string()))?;
             let signed_psbt =
                 Psbt::deserialize(&signed_raw).map_err(|e| HWIError::Device(e.to_string()))?;
             // Merge the signed inputs back into the caller's PSBT.
@@ -492,10 +506,13 @@ impl HWI for CoinCubeDevice {
 mod tests {
     use super::*;
 
+    // Valid BIP32 test vector xpub (from bitcoin crate test suite)
+    const VALID_XPUB: &str = "xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL";
+
     #[test]
     fn test_parse_ready_extended() {
-        let line = "READY:aabbccdd:1.2.3:xpub6ERApfzkCnNSi6rL5s5G7ZMTokrCFE12eFGLWi2FLBGDNTn2dGqseLPcPkfQp2PjqhJJFaMxEDdYoGQfM5QkP3yrJ4s6iiJnqJwGRoNAQMi";
-        let info = parse_ready(line);
+        let line = format!("READY:aabbccdd:1.2.3:{}", VALID_XPUB);
+        let info = parse_ready(&line);
         assert!(info.is_some(), "should parse extended READY");
         let info = info.unwrap();
         assert_eq!(info.fingerprint.as_bytes(), &[0xaa, 0xbb, 0xcc, 0xdd]);
@@ -506,14 +523,54 @@ mod tests {
 
     #[test]
     fn test_parse_ready_bare_returns_none() {
-        // Bare READY (old firmware) has no colon-delimited fields.
         let line = "READY";
         assert!(parse_ready(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_ready_with_trailing_whitespace() {
+        let line = format!("READY:aabbccdd:1.0.0:{}\r", VALID_XPUB);
+        assert!(parse_ready(&line).is_none(), "trailing \\r not stripped");
     }
 
     #[test]
     fn test_parse_ready_bad_fingerprint() {
         let line = "READY:ZZZZZZZZ:1.0.0:xpubBAD";
         assert!(parse_ready(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_ready_insufficient_parts() {
+        let line = "READY:aabbccdd:1.0.0";
+        assert!(parse_ready(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_ready_bad_version_defaults_to_zero() {
+        let line = format!("READY:aabbccdd:badver:{}", VALID_XPUB);
+        let info = parse_ready(&line);
+        assert!(
+            info.is_some(),
+            "bad version should still parse with defaults"
+        );
+        let info = info.unwrap();
+        assert_eq!(info.version.major, 0);
+        assert_eq!(info.version.minor, 0);
+        assert_eq!(info.version.patch, 0);
+    }
+
+    #[test]
+    fn test_is_ready_extended_vs_bare() {
+        let extended = format!("READY:00000000:0.0.0:{}", VALID_XPUB);
+        let bare = "READY";
+
+        assert!(
+            parse_ready(&extended).is_some(),
+            "extended format should parse"
+        );
+        assert!(
+            parse_ready(bare).is_none(),
+            "bare format should return None for fallback"
+        );
     }
 }

@@ -571,7 +571,6 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
             Err(e) => debug!("CoinCube port enumeration failed: {}", e),
         }
 
-
         match ledger::LedgerSimulator::try_connect().await {
             Ok(device) => {
                 let id = "ledger-simulator".to_string();
