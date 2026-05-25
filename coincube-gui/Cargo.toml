@@ -173,6 +173,7 @@ iced = { version = "0.14.0", features = ["x11", "wayland"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
 httpmock = "0.7"
+secp256k1 = "0.29"
 
 [features]
 # Opt-in tests that hit a real `coincube-api` dev endpoint. Requires

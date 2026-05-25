@@ -607,16 +607,18 @@ fn parse_ready(line: &str) -> Option<CoinCubeInfo> {
 // ─── CoinCubeDevice ───────────────────────────────────────────────────────────
 
 /// A connected CoinCube hardware wallet, ready for HWI operations.
-pub struct CoinCubeDevice {
+pub struct CoinCubeDevice<
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static = SerialStream,
+> {
     port: String,
-    transport: Arc<CoinCubeTransport>,
-    session: Arc<CoinCubeSession>,
+    transport: Arc<GenericCoinCubeTransport<T>>,
+    session: Arc<CoinCubeSession<T>>,
     fingerprint: Fingerprint,
     version: Version,
     account_xpub: Xpub,
 }
 
-impl std::fmt::Debug for CoinCubeDevice {
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> std::fmt::Debug for CoinCubeDevice<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -627,13 +629,73 @@ impl std::fmt::Debug for CoinCubeDevice {
     }
 }
 
-impl Drop for CoinCubeDevice {
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Drop for CoinCubeDevice<T> {
     fn drop(&mut self) {
         self.session.cancel();
     }
 }
 
-impl CoinCubeDevice {
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> CoinCubeDevice<T> {
+    async fn handshake(
+        transport: &GenericCoinCubeTransport<T>,
+    ) -> Result<CoinCubeInfo, HWIError> {
+        let _ = transport.send("GET_INFO").await;
+
+        loop {
+            let line = transport
+                .recv_line(HANDSHAKE_TIMEOUT)
+                .await
+                .map_err(|_| HWIError::DeviceNotFound)?;
+
+            debug!("CoinCube handshake line: {:?}", line);
+
+            if line.starts_with("READY:") {
+                match parse_ready(&line) {
+                    Some(i) => return Ok(i),
+                    None => {
+                        warn!("CoinCube: malformed READY line: {:?}", line);
+                        return Err(HWIError::Device("malformed READY response".to_string()));
+                    }
+                }
+            } else if line == "READY" {
+                info!("CoinCube: legacy firmware detected (bare READY), falling back to GET_XPUB");
+                return legacy_handshake(transport).await;
+            }
+        }
+    }
+
+    /// Create a CoinCubeDevice from an existing bidirectional stream.
+    ///
+    /// Performs the handshake (sends GET_INFO, waits for READY) and spawns
+    /// the background session task. Use this for testing with mock transports
+    /// (e.g. `tokio::io::duplex()`).
+    pub async fn with_stream(port_path: &str, stream: T) -> Result<Self, HWIError> {
+        let transport = GenericCoinCubeTransport::with_stream(port_path, stream);
+        let info = Self::handshake(&transport).await?;
+        let transport_arc = Arc::new(transport);
+        let session = CoinCubeSession::spawn(transport_arc.clone(), None);
+
+        Ok(Self {
+            port: port_path.to_string(),
+            transport: transport_arc,
+            session,
+            fingerprint: info.fingerprint,
+            version: info.version,
+            account_xpub: info.account_xpub,
+        })
+    }
+
+    /// Unique device ID string for use as the `HardwareWallet` id.
+    pub fn device_id(&self) -> String {
+        format!("coincube-{}", self.port)
+    }
+
+    pub fn transport(&self) -> &Arc<GenericCoinCubeTransport<T>> {
+        &self.transport
+    }
+}
+
+impl CoinCubeDevice<SerialStream> {
     /// Open a CoinCube device on the given serial port.
     ///
     /// Sends a `GET_INFO` nudge and waits for a `READY:…` response.
@@ -647,31 +709,7 @@ impl CoinCubeDevice {
     pub async fn new(port_path: &str) -> Result<Self, HWIError> {
         let transport =
             CoinCubeTransport::open(port_path).map_err(|e| HWIError::Device(e.to_string()))?;
-
-        let _ = transport.send("GET_INFO").await;
-
-        let info = loop {
-            let line = transport
-                .recv_line(HANDSHAKE_TIMEOUT)
-                .await
-                .map_err(|_| HWIError::DeviceNotFound)?;
-
-            debug!("CoinCube handshake line: {:?}", line);
-
-            if line.starts_with("READY:") {
-                match parse_ready(&line) {
-                    Some(i) => break i,
-                    None => {
-                        warn!("CoinCube: malformed READY line: {:?}", line);
-                        return Err(HWIError::Device("malformed READY response".to_string()));
-                    }
-                }
-            } else if line == "READY" {
-                info!("CoinCube: legacy firmware detected (bare READY), falling back to GET_XPUB");
-                break legacy_handshake(&transport).await?;
-            }
-        };
-
+        let info = Self::handshake(&transport).await?;
         let transport_arc = Arc::new(transport);
         let session = CoinCubeSession::spawn(transport_arc.clone(), None);
 
@@ -693,31 +731,7 @@ impl CoinCubeDevice {
     ) -> Result<Self, HWIError> {
         let transport =
             CoinCubeTransport::open(port_path).map_err(|e| HWIError::Device(e.to_string()))?;
-
-        let _ = transport.send("GET_INFO").await;
-
-        let info = loop {
-            let line = transport
-                .recv_line(HANDSHAKE_TIMEOUT)
-                .await
-                .map_err(|_| HWIError::DeviceNotFound)?;
-
-            debug!("CoinCube handshake line: {:?}", line);
-
-            if line.starts_with("READY:") {
-                match parse_ready(&line) {
-                    Some(i) => break i,
-                    None => {
-                        warn!("CoinCube: malformed READY line: {:?}", line);
-                        return Err(HWIError::Device("malformed READY response".to_string()));
-                    }
-                }
-            } else if line == "READY" {
-                info!("CoinCube: legacy firmware detected (bare READY), falling back to GET_XPUB");
-                break legacy_handshake(&transport).await?;
-            }
-        };
-
+        let info = Self::handshake(&transport).await?;
         let transport_arc = Arc::new(transport);
         let session =
             CoinCubeSession::spawn(transport_arc.clone(), Some(balance_provider));
@@ -758,22 +772,15 @@ impl CoinCubeDevice {
         debug!("CoinCube: candidate ports: {:?}", candidates);
         Ok(candidates)
     }
-
-    /// Unique device ID string for use as the `HardwareWallet` id.
-    pub fn device_id(&self) -> String {
-        format!("coincube-{}", self.port)
-    }
-
-    pub fn transport(&self) -> &Arc<CoinCubeTransport> {
-        &self.transport
-    }
 }
 
 /// Handshake with a legacy CoinCube that only sends bare `READY`.
 ///
 /// Falls back to sending `GET_XPUB:m/84'/0'/0'` to obtain the account xpub
 /// and derive the master fingerprint. Version is set to an unknown placeholder.
-async fn legacy_handshake(transport: &CoinCubeTransport) -> Result<CoinCubeInfo, HWIError> {
+async fn legacy_handshake<T: AsyncRead + AsyncWrite + Unpin + Send>(
+    transport: &GenericCoinCubeTransport<T>,
+) -> Result<CoinCubeInfo, HWIError> {
     transport
         .send("GET_XPUB:m/84'/0'/0'")
         .await
@@ -807,7 +814,7 @@ async fn legacy_handshake(transport: &CoinCubeTransport) -> Result<CoinCubeInfo,
 // ─── HWI trait implementation ─────────────────────────────────────────────────
 
 #[async_trait]
-impl HWI for CoinCubeDevice {
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> HWI for CoinCubeDevice<T> {
     fn device_kind(&self) -> DeviceKind {
         DeviceKind::Specter
     }
@@ -990,7 +997,7 @@ mod tests {
 
     // ─── CoinCubeSession tests ────────────────────────────────────────────
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
     struct MockBalanceProvider {
         balance: (u64, u64),
@@ -1196,5 +1203,425 @@ mod tests {
             matches!(err, HWIError::Device(_)),
             "timeout should return HWIError::Device"
         );
+    }
+
+    // ─── CoinCubeSimulator + PSBT signing round-trip integration test ──────
+
+    use coincube_core::miniscript::bitcoin as btc;
+    use std::str::FromStr;
+
+    /// Generate deterministic test key material using a fixed seed.
+    fn generate_test_key() -> (
+        btc::secp256k1::SecretKey,
+        Xpub,
+        Fingerprint,
+        btc::bip32::ExtendedPrivKey,
+    ) {
+        let seed = [0x42u8; 64];
+        let secp = btc::secp256k1::Secp256k1::new();
+        let xpriv =
+            btc::bip32::ExtendedPrivKey::new_master(btc::Network::Bitcoin, &seed)
+                .expect("valid seed");
+        let fingerprint = xpriv.fingerprint(&secp);
+        let path: Vec<btc::bip32::ChildNumber> = vec![
+            btc::bip32::ChildNumber::Hardened { index: 84 },
+            btc::bip32::ChildNumber::Hardened { index: 0 },
+            btc::bip32::ChildNumber::Hardened { index: 0 },
+        ];
+        let derived = xpriv
+            .derive_priv(&secp, &path)
+            .expect("valid derivation");
+        let xpub = Xpub::from_priv(&secp, &derived);
+        let privkey = derived.private_key;
+        (privkey, xpub, fingerprint, xpriv)
+    }
+
+    /// Device-side protocol handler.  Reads commands from the stream,
+    /// responds according to the CoinCube firmware spec.
+    async fn device_protocol_handler(
+        mut stream: DuplexStream,
+        privkey: btc::secp256k1::SecretKey,
+        fingerprint: Fingerprint,
+        version: Version,
+        xpub: Xpub,
+        master_xpriv: btc::bip32::ExtendedPrivKey,
+    ) {
+        let secp = btc::secp256k1::Secp256k1::new();
+        let mut reader = BufReader::new(&mut stream);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => return,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+            let cmd = line.trim();
+
+            if cmd == "GET_INFO" {
+                let resp = format!(
+                    "READY:{:x}:{}:{}\n",
+                    fingerprint, version, xpub
+                );
+                let _ = reader.get_mut().write_all(resp.as_bytes()).await;
+            } else if let Some(path_str) = cmd.strip_prefix("GET_XPUB:") {
+                let parts: Result<Vec<_>, ()> = path_str
+                    .split('/')
+                    .filter(|s| !s.is_empty() && *s != "m")
+                    .map(|s| {
+                        if s.ends_with('\'') || s.ends_with('h') || s.ends_with('H') {
+                            let idx_str: String =
+                                s.chars().filter(|c| c.is_ascii_digit()).collect();
+                            let idx: u32 = idx_str.parse().map_err(|_| ())?;
+                            Ok::<btc::bip32::ChildNumber, ()>(
+                                btc::bip32::ChildNumber::Hardened { index: idx },
+                            )
+                        } else {
+                            let idx: u32 = s.parse().map_err(|_| ())?;
+                            Ok::<btc::bip32::ChildNumber, ()>(
+                                btc::bip32::ChildNumber::Normal { index: idx },
+                            )
+                        }
+                    })
+                    .collect();
+                match parts {
+                    Ok(p) => match master_xpriv.derive_priv(&secp, &p) {
+                        Ok(derived) => {
+                            let resp_xpub = Xpub::from_priv(&secp, &derived);
+                            let resp = format!("XPUB:{}\n", resp_xpub);
+                            let _ = reader.get_mut().write_all(resp.as_bytes()).await;
+                        }
+                        Err(_) => {
+                            let _ = reader.get_mut().write_all(b"ERROR:1\n").await;
+                        }
+                    },
+                    Err(_) => {
+                        let _ = reader.get_mut().write_all(b"ERROR:2\n").await;
+                    }
+                }
+            } else if let Some(b64) = cmd.strip_prefix("PSBT:") {
+                let raw =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64);
+                match raw {
+                    Ok(raw) => match Psbt::deserialize(&raw) {
+                        Ok(mut psbt) => {
+                            if sign_psbt_with_key(&mut psbt, &privkey, &secp) {
+                                let signed_raw = psbt.serialize();
+                                let signed_b64 = base64::Engine::encode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    &signed_raw,
+                                );
+                                let resp = format!("SIGNED:{}\n", signed_b64);
+                                let _ = reader.get_mut().write_all(resp.as_bytes()).await;
+                            } else {
+                                let _ = reader.get_mut().write_all(b"ERROR:3\n").await;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = reader.get_mut().write_all(b"ERROR:4\n").await;
+                        }
+                    },
+                    Err(_) => {
+                        let _ = reader.get_mut().write_all(b"ERROR:5\n").await;
+                    }
+                }
+            } else if cmd.starts_with("VERIFY:") {
+                let _ = reader.get_mut().write_all(b"VERIFIED\n").await;
+            } else {
+                let _ = reader.get_mut().write_all(b"ERROR:6\n").await;
+            }
+        }
+    }
+
+    /// Sign all P2WPKH inputs in a PSBT with the given private key.
+    fn sign_psbt_with_key(
+        psbt: &mut Psbt,
+        privkey: &btc::secp256k1::SecretKey,
+        secp: &btc::secp256k1::Secp256k1<btc::secp256k1::All>,
+    ) -> bool {
+        let pk_inner = btc::secp256k1::PublicKey::from_secret_key(secp, privkey);
+        let pubkey = btc::PublicKey::new(pk_inner);
+
+        for (i, input) in psbt.inputs.iter_mut().enumerate() {
+            let (value, script_pubkey) = match &input.witness_utxo {
+                Some(utxo) => (utxo.value, utxo.script_pubkey.clone()),
+                None => continue,
+            };
+
+            let sighash_type = btc::sighash::EcdsaSighashType::All;
+
+            let sighash = match btc::sighash::SighashCache::new(&psbt.unsigned_tx)
+                .p2wpkh_signature_hash(i, &script_pubkey, value, sighash_type)
+            {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let msg = match btc::secp256k1::Message::from_digest_slice(sighash.as_ref()) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let raw_sig = secp.sign_ecdsa_low_r(&msg, privkey);
+            let btc_sig = btc::ecdsa::Signature::sighash_all(raw_sig);
+            input.partial_sigs.insert(pubkey, btc_sig);
+            return true;
+        }
+
+        false
+    }
+
+    /// Build a minimal P2WPKH PSBT with a single input spending to `pubkey`.
+    fn build_test_psbt(pubkey: &btc::PublicKey) -> Psbt {
+        use btc::hashes::Hash;
+
+        let wpkh = btc::WPubkeyHash::hash(&pubkey.to_bytes());
+        let script_pubkey = btc::ScriptBuf::new_p2wpkh(&wpkh);
+        let value = btc::Amount::from_sat(100_000);
+
+        let tx = btc::Transaction {
+            version: btc::transaction::Version::TWO,
+            lock_time: btc::absolute::LockTime::ZERO,
+            input: vec![btc::TxIn {
+                previous_output: btc::OutPoint::null(),
+                script_sig: btc::ScriptBuf::new(),
+                sequence: btc::Sequence::MAX,
+                witness: btc::Witness::new(),
+            }],
+            output: vec![],
+        };
+
+        let mut psbt = Psbt {
+            unsigned_tx: tx,
+            version: 0,
+            xpub: Default::default(),
+            proprietary: Default::default(),
+            unknown: Default::default(),
+            inputs: vec![],
+            outputs: vec![Default::default()],
+        };
+
+        psbt.inputs.push(btc::psbt::Input {
+            witness_utxo: Some(btc::TxOut {
+                value,
+                script_pubkey,
+            }),
+            sighash_type: Some(btc::sighash::EcdsaSighashType::All.into()),
+            ..Default::default()
+        });
+
+        psbt
+    }
+
+    /// Thin HWI wrapper around a GenericCoinCubeTransport<DuplexStream>.
+    /// Uses direct transport.send() / transport.recv_line() to avoid the
+    /// session background-reader deadlock during testing.
+    struct DirectTransportDevice {
+        transport: GenericCoinCubeTransport<DuplexStream>,
+    }
+
+    impl std::fmt::Debug for DirectTransportDevice {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("DirectTransportDevice")
+                .field("port", &self.transport.port_path())
+                .finish()
+        }
+    }
+
+    impl DirectTransportDevice {
+        async fn send_and_recv_one(
+            &self,
+            cmd: &str,
+            expected_prefixes: &[&str],
+            timeout: Duration,
+        ) -> Result<String, HWIError> {
+            self.transport
+                .send(cmd)
+                .await
+                .map_err(|e| HWIError::Device(e.to_string()))?;
+            let line = self
+                .transport
+                .recv_line(timeout)
+                .await
+                .map_err(|e| HWIError::Device(e.to_string()))?;
+            for prefix in expected_prefixes {
+                if line.starts_with(prefix) {
+                    return Ok(line);
+                }
+            }
+            Err(HWIError::Device(format!(
+                "unexpected response: {}",
+                line
+            )))
+        }
+    }
+
+    #[async_trait]
+    impl HWI for DirectTransportDevice {
+        fn device_kind(&self) -> DeviceKind {
+            DeviceKind::Specter
+        }
+        async fn get_version(&self) -> Result<Version, HWIError> {
+            Err(HWIError::UnimplementedMethod)
+        }
+        async fn get_master_fingerprint(&self) -> Result<Fingerprint, HWIError> {
+            Err(HWIError::UnimplementedMethod)
+        }
+        async fn get_extended_pubkey(
+            &self,
+            _path: &DerivationPath,
+        ) -> Result<Xpub, HWIError> {
+            Err(HWIError::UnimplementedMethod)
+        }
+        async fn register_wallet(
+            &self,
+            _name: &str,
+            _policy: &str,
+        ) -> Result<Option<[u8; 32]>, HWIError> {
+            Err(HWIError::UnimplementedMethod)
+        }
+        async fn is_wallet_registered(
+            &self,
+            _name: &str,
+            _policy: &str,
+        ) -> Result<bool, HWIError> {
+            Ok(false)
+        }
+        async fn display_address(
+            &self,
+            _script: &AddressScript,
+        ) -> Result<(), HWIError> {
+            Err(HWIError::UnimplementedMethod)
+        }
+        async fn sign_tx(&self, tx: &mut Psbt) -> Result<(), HWIError> {
+            let raw = tx.serialize();
+            let b64 =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &raw);
+
+            let line = self
+                .send_and_recv_one(
+                    &format!("PSBT:{}", b64),
+                    &["SIGNED:", "REJECTED", "ERROR:"],
+                    SIGN_TIMEOUT,
+                )
+                .await?;
+
+            if let Some(b64_signed) = line.strip_prefix("SIGNED:") {
+                let signed_raw = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    b64_signed,
+                )
+                .map_err(|e| HWIError::Device(e.to_string()))?;
+                let signed_psbt = Psbt::deserialize(&signed_raw)
+                    .map_err(|e| HWIError::Device(e.to_string()))?;
+                *tx = signed_psbt;
+                Ok(())
+            } else if line == "REJECTED" {
+                Err(HWIError::UserRefused)
+            } else {
+                Err(HWIError::Device(format!("signing failed: {}", line)))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_full_psbt_signing_roundtrip() {
+        let (privkey, xpub, fingerprint, master_xpriv) = generate_test_key();
+        let secp = btc::secp256k1::Secp256k1::new();
+        let pk_inner = btc::secp256k1::PublicKey::from_secret_key(&secp, &privkey);
+        let pubkey = btc::PublicKey::new(pk_inner);
+        let version = Version {
+            major: 1,
+            minor: 0,
+            patch: 0,
+            prerelease: None,
+        };
+
+        let (device_end, host_end) = tokio::io::duplex(65536);
+
+        let ver = version.clone();
+        let xpub_clone = xpub.clone();
+        tokio::spawn(async move {
+            device_protocol_handler(
+                device_end,
+                privkey,
+                fingerprint,
+                ver,
+                xpub_clone,
+                master_xpriv,
+            )
+            .await;
+        });
+
+        let transport =
+            GenericCoinCubeTransport::<DuplexStream>::with_stream("mock", host_end);
+        let device = DirectTransportDevice { transport };
+
+        // ── Handshake: send GET_INFO, parse READY response ──────────────
+        let ready_line = device
+            .send_and_recv_one("GET_INFO", &["READY:", "READY"], HANDSHAKE_TIMEOUT)
+            .await
+            .expect("should receive READY");
+
+        let info = parse_ready(&ready_line).expect("should parse READY line");
+        assert_eq!(info.fingerprint, fingerprint);
+        assert_eq!(info.version.major, 1);
+        assert_eq!(info.version.minor, 0);
+
+        // ── GET_XPUB round-trip ────────────────────────────────────────
+        let xpub_line = device
+            .send_and_recv_one(
+                "GET_XPUB:m/84h/0h/0h",
+                &["XPUB:", "ERROR:"],
+                QUERY_TIMEOUT,
+            )
+            .await
+            .expect("should receive XPUB");
+        let got_xpub_str = xpub_line
+            .strip_prefix("XPUB:")
+            .expect("XPUB prefix");
+        let got_xpub = Xpub::from_str(got_xpub_str).expect("valid xpub");
+        assert_eq!(got_xpub, xpub);
+
+        // ── PSBT signing round-trip ────────────────────────────────────
+        let mut psbt = build_test_psbt(&pubkey);
+        assert!(
+            psbt.inputs[0].partial_sigs.is_empty(),
+            "partial_sigs should be empty before signing"
+        );
+
+        device
+            .sign_tx(&mut psbt)
+            .await
+            .expect("sign_tx should succeed");
+
+        assert!(
+            !psbt.inputs[0].partial_sigs.is_empty(),
+            "partial_sigs should be non-empty after signing"
+        );
+
+        let sig = psbt.inputs[0]
+            .partial_sigs
+            .get(&pubkey)
+            .cloned()
+            .expect("should contain our pubkey's signature");
+
+        let input = &psbt.inputs[0];
+        let (value, script_pubkey) = match &input.witness_utxo {
+            Some(utxo) => (utxo.value, utxo.script_pubkey.clone()),
+            None => panic!("missing witness_utxo"),
+        };
+        let sighash = btc::sighash::SighashCache::new(&psbt.unsigned_tx)
+            .p2wpkh_signature_hash(
+                0,
+                &script_pubkey,
+                value,
+                btc::sighash::EcdsaSighashType::All,
+            )
+            .unwrap();
+        let msg = btc::secp256k1::Message::from_digest_slice(sighash.as_ref()).unwrap();
+        pubkey
+            .verify(&secp, &msg, &sig)
+            .expect("ECDSA signature should be valid");
     }
 }

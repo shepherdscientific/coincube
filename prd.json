@@ -55,7 +55,7 @@
       "id": "US-HW-008",
       "description": "Integration test: full PSBT signing round-trip in simulation mode. In test mode (no real device), instantiate a CoinCubeSimulator that replays the serial protocol via a Unix socket / pipe pair. Test: (1) enumerate finds the simulated port; (2) READY response with test fingerprint/xpub is parsed; (3) send a valid P2WPKH PSBT; (4) simulator auto-signs and responds SIGNED; (5) returned PSBT has non-empty partial_sigs. Run with: cargo test -p coincube-gui -- coincube_hw. Acceptance criteria: test passes in CI without a physical device.",
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]
