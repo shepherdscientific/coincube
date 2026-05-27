@@ -76,7 +76,7 @@
       "id": "US-HW-011",
       "description": "Firmware version check and upgrade prompt. The version string is already delivered in the READY message and stored in CoinCubeDevice. Add a firmware management panel to the CoinCube device settings page: (1) display the connected firmware version (major.minor.patch) and the device serial from SE; (2) on panel open, fetch the latest published firmware version from a Coincube-hosted endpoint (e.g. GET /api/v1/firmware/coincube/latest returning { version, sha256, url }); (3) if connected version < latest, show an 'Update available' badge with changelog link; (4) upgrade path for dev builds (WiFi OTA already in wallet1.ino): show the OTA trigger command or instruct the user to flash via PlatformIO — do not implement silent background flashing; (5) for production builds (no WiFi), show a 'Flash with PlatformIO' instruction with the firmware .bin URL. Acceptance criteria: (a) version string renders correctly from READY parse; (b) network fetch is non-blocking and fails gracefully (no version check if offline); (c) no upgrade is triggered automatically — user must confirm; (d) panel visible in device settings regardless of update availability.",
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]
