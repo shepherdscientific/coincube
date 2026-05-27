@@ -69,7 +69,7 @@
       "id": "US-HW-010",
       "description": "Address verification UI round-trip. The HWI trait display_address() method is implemented in CoinCubeDevice (sends VERIFY:<address>, waits for VERIFIED or MISMATCH), the VERIFY_ADDRESS and VERIFY_MATCH / VERIFY_MISMATCH states exist in wallet1.ino, and the vault receive screen has address-verify UI states — but the three are not connected end-to-end. Wire: (1) add a 'Verify on CoinCube' button to the receive address screen when a CoinCube is in the Supported hw list and its fingerprint matches the active Cube; (2) pressing it calls device.display_address(script_pubkey) in a background task; (3) show a 'Check your CoinCube display' waiting overlay with a 30 s timeout; (4) on VERIFIED response, show a green confirmed banner; (5) on MISMATCH or timeout, show an error with guidance to power-cycle and check firmware. Acceptance criteria: (a) button appears only when a matching CoinCube is connected; (b) full round-trip exercised by US-HW-008 simulator (extend the sim to respond VERIFIED); (c) MISMATCH path renders the error view without panic.",
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
