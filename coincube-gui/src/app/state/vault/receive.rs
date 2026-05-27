@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use coincube_core::miniscript::bitcoin::{
     bip32::{ChildNumber, Fingerprint},
@@ -29,9 +30,11 @@ use crate::daemon::{
 };
 
 const PREV_ADDRESSES_PAGE_SIZE: usize = 20;
+const COINCUBE_VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub enum Modal {
     VerifyAddress(VerifyAddressModal),
+    VerifyCoinCube(VerifyCoinCubeModal),
     ShowQrCode(ShowQrCodeModal),
     None,
 }
@@ -73,11 +76,13 @@ pub struct VaultReceivePanel {
     modal: Modal,
     warning: Option<Error>,
     processing: bool,
+    hws: HardwareWallets,
 }
 
 impl VaultReceivePanel {
     pub fn new(data_dir: CoincubeDirectory, wallet: Arc<Wallet>) -> Self {
         Self {
+            hws: HardwareWallets::new(data_dir.clone(), Network::Bitcoin),
             data_dir,
             wallet,
             addresses: Addresses::default(),
@@ -115,6 +120,17 @@ impl VaultReceivePanel {
 
 impl State for VaultReceivePanel {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        let wallet_fingerprints = self.wallet.descriptor_keys();
+        let has_matching_coin_cube = self.hws.list.iter().any(|hw| {
+            if let HardwareWallet::Supported {
+                id, fingerprint, ..
+            } = hw
+            {
+                id.starts_with("coincube-") && wallet_fingerprints.contains(fingerprint)
+            } else {
+                false
+            }
+        });
         let content = view::dashboard(
             menu,
             cache,
@@ -128,12 +144,16 @@ impl State for VaultReceivePanel {
                 self.labels_edited.cache(),
                 self.prev_continue_from.is_none(),
                 self.processing,
+                has_matching_coin_cube,
             ),
         );
 
         // Use global toast overlay instead of local toast
         match &self.modal {
             Modal::VerifyAddress(m) => modal::Modal::new(content, m.view())
+                .on_blur(Some(view::Message::Close))
+                .into(),
+            Modal::VerifyCoinCube(m) => modal::Modal::new(content, m.view())
                 .on_blur(Some(view::Message::Close))
                 .into(),
             Modal::ShowQrCode(m) => modal::Modal::new(content, m.view())
@@ -144,11 +164,14 @@ impl State for VaultReceivePanel {
     }
 
     fn subscription(&self) -> Subscription<Message> {
+        let mut subs = vec![self.hws.refresh().map(Message::HardwareWallets)];
         if let Modal::VerifyAddress(modal) = &self.modal {
-            modal.subscription()
-        } else {
-            Subscription::none()
+            subs.push(modal.subscription());
         }
+        if let Modal::VerifyCoinCube(modal) = &self.modal {
+            subs.push(modal.subscription());
+        }
+        Subscription::batch(subs)
     }
 
     fn update(
@@ -161,7 +184,6 @@ impl State for VaultReceivePanel {
         match message {
             Message::View(view::Message::VaultReceive(msg)) => match msg {
                 view::VaultReceiveMessage::Copy(address) => {
-                    // Use global toast overlay
                     let toast_task = Task::done(Message::View(view::Message::ShowToast(
                         log::Level::Info,
                         "Copied Vault address to clipboard".to_string(),
@@ -169,7 +191,76 @@ impl State for VaultReceivePanel {
 
                     Task::batch([clipboard::write(address), toast_task])
                 }
+                view::VaultReceiveMessage::CoinCubeVerify(i) => {
+                    let addr = self.address(i).cloned();
+                    let index = self.derivation_index(i).copied();
+                    if let (Some(address), Some(index)) = (addr, index) {
+                        let wallet_fingerprints = self.wallet.descriptor_keys();
+                        if let Some(fingerprint) =
+                            find_coin_cube_fingerprint(&self.hws.list, &wallet_fingerprints)
+                        {
+                            if let Some(device) =
+                                get_coin_cube_device(&self.hws.list, &fingerprint)
+                            {
+                                self.modal = Modal::VerifyCoinCube(VerifyCoinCubeModal::new(
+                                    address.clone(),
+                                    index,
+                                    fingerprint,
+                                    VerifyCoinCubeStatus::Waiting,
+                                ));
+                                let fg = fingerprint;
+                                return Task::perform(
+                                    async move {
+                                        tokio::time::timeout(
+                                            COINCUBE_VERIFY_TIMEOUT,
+                                            verify_address(device, index),
+                                        )
+                                        .await
+                                        .unwrap_or(Err(Error::from(
+                                            async_hwi::Error::Device(
+                                                "CoinCube verification timed out after 30 seconds"
+                                                    .to_string(),
+                                            ),
+                                        )))
+                                    },
+                                    move |res| Message::Verified(fg, res),
+                                );
+                            }
+                        }
+                        return Task::done(Message::View(view::Message::ShowError(
+                            "No matching CoinCube device found. Connect your CoinCube and try again."
+                                .to_string(),
+                        )));
+                    }
+                    Task::none()
+                }
             },
+            Message::HardwareWallets(msg) => {
+                self.hws
+                    .set_network(cache.network);
+                if let Err(e) = self.hws.update(msg.clone()) {
+                    let err: Error = e.into();
+                    let err_msg = err.to_string();
+                    self.warning = Some(err);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+                if let Modal::VerifyAddress(ref mut m) = self.modal {
+                    return m.update(daemon, cache, Message::HardwareWallets(msg));
+                }
+                if let Modal::VerifyCoinCube(ref mut m) = self.modal {
+                    return m.update(daemon, cache, Message::HardwareWallets(msg));
+                }
+                Task::none()
+            }
+            Message::Verified(fg, res) => {
+                if let Modal::VerifyCoinCube(ref mut m) = self.modal {
+                    return m.update(daemon, cache, Message::Verified(fg, res));
+                }
+                if let Modal::VerifyAddress(ref mut m) = self.modal {
+                    return m.update(daemon, cache, Message::Verified(fg, res));
+                }
+                Task::none()
+            }
             Message::View(view::Message::Label(_, _)) | Message::LabelsUpdated(_) => {
                 match self.labels_edited.update(
                     daemon.clone(),
@@ -313,6 +404,8 @@ impl State for VaultReceivePanel {
             }
             _ => {
                 if let Modal::VerifyAddress(ref mut m) = self.modal {
+                    m.update(daemon, cache, message)
+                } else if let Modal::VerifyCoinCube(ref mut m) = self.modal {
                     m.update(daemon, cache, message)
                 } else {
                     Task::none()
@@ -467,6 +560,114 @@ async fn verify_address(
     })
     .await?;
     Ok(())
+}
+
+fn find_coin_cube_fingerprint(
+    hws: &[HardwareWallet],
+    wallet_fingerprints: &HashSet<Fingerprint>,
+) -> Option<Fingerprint> {
+    hws.iter().find_map(|hw| {
+        if let HardwareWallet::Supported {
+            fingerprint, id, ..
+        } = hw
+        {
+            if id.starts_with("coincube-") && wallet_fingerprints.contains(fingerprint) {
+                return Some(*fingerprint);
+            }
+        }
+        None
+    })
+}
+
+fn get_coin_cube_device(
+    hws: &[HardwareWallet],
+    fingerprint: &Fingerprint,
+) -> Option<std::sync::Arc<dyn async_hwi::HWI + Send + Sync>> {
+    hws.iter().find_map(|hw| {
+        if let HardwareWallet::Supported {
+            device,
+            fingerprint: fg,
+            id,
+            ..
+        } = hw
+        {
+            if id.starts_with("coincube-") && fg == fingerprint {
+                return Some(device.clone());
+            }
+        }
+        None
+    })
+}
+
+pub struct VerifyCoinCubeModal {
+    address: Address,
+    derivation_index: ChildNumber,
+    fingerprint: Fingerprint,
+    status: VerifyCoinCubeStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyCoinCubeStatus {
+    Waiting,
+    Verified,
+    Mismatch,
+    Error(String),
+}
+
+impl VerifyCoinCubeModal {
+    pub fn new(
+        address: Address,
+        derivation_index: ChildNumber,
+        fingerprint: Fingerprint,
+        status: VerifyCoinCubeStatus,
+    ) -> Self {
+        Self {
+            address,
+            derivation_index,
+            fingerprint,
+            status,
+        }
+    }
+
+    pub fn view(&self) -> Element<'_, view::Message> {
+        view::vault::receive::verify_coin_cube_modal(
+            &self.address,
+            &self.derivation_index,
+            &self.fingerprint,
+            &self.status,
+        )
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        Subscription::none()
+    }
+
+    fn update(
+        &mut self,
+        _daemon: Arc<dyn Daemon + Sync + Send>,
+        _cache: &Cache,
+        message: Message,
+    ) -> Task<Message> {
+        match message {
+            Message::Verified(fg, res) => {
+                if self.fingerprint == fg {
+                    self.status = match res {
+                        Ok(()) => VerifyCoinCubeStatus::Verified,
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("mismatch") || err_str.contains("MISMATCH") {
+                                VerifyCoinCubeStatus::Mismatch
+                            } else {
+                                VerifyCoinCubeStatus::Error(err_str)
+                            }
+                        }
+                    };
+                }
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -81,6 +81,7 @@ pub trait Close {
 #[derive(Debug, Clone)]
 pub enum VaultReceiveMessage {
     Copy(String),
+    CoinCubeVerify(usize),
 }
 
 #[derive(Debug, Clone)]

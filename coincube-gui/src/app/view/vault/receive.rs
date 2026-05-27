@@ -25,10 +25,13 @@ use coincube_ui::{
 };
 
 use crate::{
-    app::view::{
-        message::VaultReceiveMessage,
-        placeholder,
-        vault::{hw, label},
+    app::{
+        state::vault::receive::VerifyCoinCubeStatus,
+        view::{
+            message::VaultReceiveMessage,
+            placeholder,
+            vault::{hw, label},
+        },
     },
     hw::HardwareWallet,
 };
@@ -40,6 +43,7 @@ pub fn address_card<'a>(
     address: &'a bitcoin::Address,
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
+    has_matching_coin_cube: bool,
 ) -> Container<'a, Message> {
     let addr = address.to_string();
     card::simple(
@@ -88,10 +92,22 @@ pub fn address_card<'a>(
                             .on_press(Message::Select(row_index)),
                     )
                     .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::secondary(None, "Show QR Code")
-                            .on_press(Message::ShowQrCode(row_index)),
-                    ),
+                    .push({
+                        let mut row = Row::new().spacing(10);
+                        if has_matching_coin_cube {
+                            row = row.push(
+                                button::secondary(None, "Verify on CoinCube")
+                                    .on_press(Message::VaultReceive(
+                                        VaultReceiveMessage::CoinCubeVerify(row_index),
+                                    )),
+                            );
+                        }
+                        row = row.push(
+                            button::secondary(None, "Show QR Code")
+                                .on_press(Message::ShowQrCode(row_index)),
+                        );
+                        row
+                    }),
             )
             .spacing(10),
     )
@@ -108,6 +124,7 @@ pub fn receive<'a>(
     labels_editing: &'a HashMap<String, form::Value<String>>,
     is_last_page: bool,
     processing: bool,
+    has_matching_coin_cube: bool,
 ) -> Element<'a, Message> {
     // Number of start and end address characters to show in collapsed view.
     const NUM_ADDR_CHARS: usize = 16;
@@ -143,7 +160,7 @@ pub fn receive<'a>(
                     Column::new().spacing(10).width(Length::Fill),
                     |col, (i, address)| {
                         addresses_count += 1;
-                        col.push(address_card(i, address, labels, labels_editing))
+                        col.push(address_card(i, address, labels, labels_editing, has_matching_coin_cube))
                     },
                 )),
         )
@@ -245,6 +262,7 @@ pub fn receive<'a>(
                             address,
                             prev_labels,
                             labels_editing,
+                            has_matching_coin_cube,
                         ))
                         .padding(0) // so that button & card borders match
                         .on_press(Message::SelectAddress(address.clone()))
@@ -347,6 +365,168 @@ pub fn verify_address_modal<'a>(
                     )
                     .width(Length::Fill),
             )
+            .spacing(20)
+            .width(Length::Fill)
+            .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .max_width(750)
+    .into()
+}
+
+pub fn verify_coin_cube_modal<'a>(
+    address: &Address,
+    derivation_index: &ChildNumber,
+    fingerprint: &Fingerprint,
+    status: &VerifyCoinCubeStatus,
+) -> Element<'a, Message> {
+    use coincube_ui::image;
+
+    let status_content: Element<'_, Message> = match status {
+        VerifyCoinCubeStatus::Waiting => Column::new()
+            .push(
+                Row::new()
+                    .push(
+                        image::coin_cube_hw_icon()
+                            .width(Length::Fixed(32.0))
+                            .height(Length::Fixed(32.0)),
+                    )
+                    .push(Space::new().width(Length::Fixed(10.0)))
+                    .push(text("Check your CoinCube display").bold()),
+            )
+            .push(Space::new().height(Length::Fixed(10.0)))
+            .push(
+                text(
+                    "Verify the address shown on your CoinCube device matches the one displayed below. \
+                     Confirm on the device to proceed.",
+                )
+                .small()
+                .style(theme::text::secondary),
+            )
+            .into(),
+        VerifyCoinCubeStatus::Verified => Column::new()
+            .push(
+                Row::new()
+                    .push(
+                        image::coin_cube_hw_icon()
+                            .width(Length::Fixed(32.0))
+                            .height(Length::Fixed(32.0)),
+                    )
+                    .push(Space::new().width(Length::Fixed(10.0)))
+                    .push(
+                        text("Address verified by CoinCube")
+                            .bold()
+                            .style(theme::text::success),
+                    ),
+            )
+            .push(Space::new().height(Length::Fixed(10.0)))
+            .push(
+                text("The address has been confirmed. Your CoinCube device displayed the same address.")
+                    .small(),
+            )
+            .into(),
+        VerifyCoinCubeStatus::Mismatch => Column::new()
+            .push(
+                Row::new()
+                    .push(
+                        image::coin_cube_hw_icon()
+                            .width(Length::Fixed(32.0))
+                            .height(Length::Fixed(32.0)),
+                    )
+                    .push(Space::new().width(Length::Fixed(10.0)))
+                    .push(text("Address mismatch").bold().style(theme::text::error)),
+            )
+            .push(Space::new().height(Length::Fixed(10.0)))
+            .push(
+                text(
+                    "The address shown on your CoinCube device does not match. Do not send funds to this address. \
+                     Power-cycle your device and ensure you are running the latest firmware.",
+                )
+                .small(),
+            )
+            .push(Space::new().height(Length::Fixed(5.0)))
+            .push(
+                text("If issues persist, check for firmware updates in CoinCube settings.")
+                    .small()
+                    .style(theme::text::secondary),
+            )
+            .into(),
+        VerifyCoinCubeStatus::Error(msg) => Column::new()
+            .push(
+                Row::new()
+                    .push(
+                        image::coin_cube_hw_icon()
+                            .width(Length::Fixed(32.0))
+                            .height(Length::Fixed(32.0)),
+                    )
+                    .push(Space::new().width(Length::Fixed(10.0)))
+                    .push(text("Verification failed").bold().style(theme::text::error)),
+            )
+            .push(Space::new().height(Length::Fixed(10.0)))
+            .push(text(format!("Error: {}", msg)).small())
+            .push(Space::new().height(Length::Fixed(5.0)))
+            .push(
+                text(
+                    "Power-cycle your CoinCube device and ensure you are running the latest firmware. Try again.",
+                )
+                .small()
+                .style(theme::text::secondary),
+            )
+            .into(),
+    };
+
+    card::simple(
+        Column::new()
+            .push(
+                Column::new()
+                    .push(
+                        Row::new()
+                            .width(Length::Fill)
+                            .align_y(Alignment::Center)
+                            .push(Container::new(text("Address:").bold()).width(Length::Fill))
+                            .push(
+                                Row::new()
+                                    .align_y(Alignment::Center)
+                                    .push(Container::new(text(address.to_string()).small()))
+                                    .push(
+                                        Button::new(icon::clipboard_icon())
+                                            .on_press(Message::VaultReceive(
+                                                VaultReceiveMessage::Copy(address.to_string()),
+                                            ))
+                                            .style(theme::button::transparent_border),
+                                    )
+                                    .width(Length::Shrink),
+                            ),
+                    )
+                    .push(
+                        Row::new()
+                            .width(Length::Fill)
+                            .align_y(Alignment::Center)
+                            .push(
+                                Container::new(text("Derivation index:").bold())
+                                    .width(Length::Fill),
+                            )
+                            .push(
+                                Container::new(text(derivation_index.to_string()).small())
+                                    .width(Length::Shrink),
+                            ),
+                    )
+                    .push(
+                        Row::new()
+                            .width(Length::Fill)
+                            .align_y(Alignment::Center)
+                            .push(
+                                Container::new(text("Device fingerprint:").bold())
+                                    .width(Length::Fill),
+                            )
+                            .push(
+                                Container::new(text(fingerprint.to_string()).small())
+                                    .width(Length::Shrink),
+                            ),
+                    )
+                    .spacing(5),
+            )
+            .push(status_content)
             .spacing(20)
             .width(Length::Fill)
             .align_x(Alignment::Center),

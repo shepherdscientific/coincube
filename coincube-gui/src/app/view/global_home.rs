@@ -854,7 +854,7 @@ fn confirm_transfer_view<'a>(
                             )
                             .push(receive_address.map(|addr| -> Element<'a, Message> {
                                 if address_expanded {
-                                    Button::new(address_card(0, addr, labels, labels_editing))
+                                    Button::new(address_card(0, addr, labels, labels_editing, false))
                                         .padding(0)
                                         .on_press(Message::SelectAddress(addr.clone()))
                                         .style(theme::button::transparent_border)
@@ -941,7 +941,7 @@ fn confirm_transfer_view<'a>(
                                 )
                                 .push_maybe(receive_address.map(|addr| -> Element<'a, Message> {
                                     if address_expanded {
-                                        Button::new(address_card(0, addr, labels, labels_editing))
+                                        Button::new(address_card(0, addr, labels, labels_editing, false))
                                             .padding(0)
                                             .on_press(Message::SelectAddress(addr.clone()))
                                             .style(theme::button::transparent_border)
