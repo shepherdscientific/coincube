@@ -57,6 +57,27 @@
       "priority": 8,
       "passes": true,
       "notes": ""
+    },
+    {
+      "id": "US-HW-009",
+      "description": "Watch-only Cube auto-registration from account_xpub. When CoinCube is first detected and no Cube with the matching master fingerprint exists in the datadir, prompt the user to create a watch-only Cube using the xpub received in the READY message. The `account_xpub` field in CoinCubeDevice is currently parsed but never consumed (dead_code warning at coincube-gui/src/coincube_hw.rs:618). Fix: (1) after CoinCubeDevice::new() succeeds in the hw.rs refresh loop, check the app's known fingerprints; (2) if unrecognised, emit a new HardwareWalletMessage::NewDeviceDetected { fingerprint, account_xpub, version } event; (3) the UI shows a one-time 'Add CoinCube wallet?' banner with the fingerprint; (4) on confirm, derive a P2WPKH watch-only descriptor from account_xpub and register it as a new Cube in the datadir (no mnemonic, no Breez client — software-wallet-specific paths must not be entered); (5) subsequent connects skip the banner and go straight to Supported state. Acceptance criteria: (a) dead_code warning on account_xpub is resolved; (b) first-connect creates a valid watch-only Cube; (c) reconnect on same machine does not re-prompt; (d) cargo test clean.",
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-HW-010",
+      "description": "Address verification UI round-trip. The HWI trait display_address() method is implemented in CoinCubeDevice (sends VERIFY:<address>, waits for VERIFIED or MISMATCH), the VERIFY_ADDRESS and VERIFY_MATCH / VERIFY_MISMATCH states exist in wallet1.ino, and the vault receive screen has address-verify UI states — but the three are not connected end-to-end. Wire: (1) add a 'Verify on CoinCube' button to the receive address screen when a CoinCube is in the Supported hw list and its fingerprint matches the active Cube; (2) pressing it calls device.display_address(script_pubkey) in a background task; (3) show a 'Check your CoinCube display' waiting overlay with a 30 s timeout; (4) on VERIFIED response, show a green confirmed banner; (5) on MISMATCH or timeout, show an error with guidance to power-cycle and check firmware. Acceptance criteria: (a) button appears only when a matching CoinCube is connected; (b) full round-trip exercised by US-HW-008 simulator (extend the sim to respond VERIFIED); (c) MISMATCH path renders the error view without panic.",
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-HW-011",
+      "description": "Firmware version check and upgrade prompt. The version string is already delivered in the READY message and stored in CoinCubeDevice. Add a firmware management panel to the CoinCube device settings page: (1) display the connected firmware version (major.minor.patch) and the device serial from SE; (2) on panel open, fetch the latest published firmware version from a Coincube-hosted endpoint (e.g. GET /api/v1/firmware/coincube/latest returning { version, sha256, url }); (3) if connected version < latest, show an 'Update available' badge with changelog link; (4) upgrade path for dev builds (WiFi OTA already in wallet1.ino): show the OTA trigger command or instruct the user to flash via PlatformIO — do not implement silent background flashing; (5) for production builds (no WiFi), show a 'Flash with PlatformIO' instruction with the firmware .bin URL. Acceptance criteria: (a) version string renders correctly from READY parse; (b) network fetch is non-blocking and fails gracefully (no version check if offline); (c) no upgrade is triggered automatically — user must confirm; (d) panel visible in device settings regardless of update availability.",
+      "priority": 11,
+      "passes": false,
+      "notes": ""
     }
   ]
 }
