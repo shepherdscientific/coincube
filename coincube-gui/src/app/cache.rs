@@ -11,8 +11,9 @@ use crate::{
         Currency, PriceSource,
     },
 };
-use coincube_core::miniscript::bitcoin::Network;
+use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, Network};
 use coincubed::commands::CoinStatus;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -126,6 +127,11 @@ pub struct Cache {
     /// registered to" troubleshooting. `None` for local-daemon
     /// installs.
     pub connect_email: Option<String>,
+    /// Known CoinCube hardware wallet fingerprints that have been
+    /// registered with a watch-only wallet. Used by the HW refresh
+    /// loop to skip the NewDeviceDetected prompt on subsequent
+    /// connections.
+    pub known_coincube_fingerprints: HashSet<Fingerprint>,
 }
 
 /// only used for tests.
@@ -163,6 +169,7 @@ impl std::default::Default for Cache {
             connect_stream_status: crate::app::ConnectionStatus::default(),
             connect_device_id: None,
             connect_email: None,
+            known_coincube_fingerprints: HashSet::new(),
         }
     }
 }

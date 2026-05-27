@@ -51,6 +51,7 @@ use crate::{
     },
     daemon::{embedded::EmbeddedDaemon, Daemon, DaemonBackend, DaemonError},
     dir::CoincubeDirectory,
+    hw::{create_coin_cube_watchonly_wallet, HardwareWalletMessage},
     node::{
         bitcoind::{internal_bitcoind_datadir, internal_bitcoind_debug_log_path, Bitcoind},
         NodeType,
@@ -2100,6 +2101,52 @@ impl App {
             } => {
                 return connect_stream_ready_task(network, datadir, tokens, email, cube_uuid);
             }
+            Message::HardwareWallets(HardwareWalletMessage::NewDeviceDetected {
+                fingerprint,
+                account_xpub,
+                version: _,
+                port: _,
+            }) => {
+                if self.cache.known_coincube_fingerprints.contains(&fingerprint) {
+                    return Task::none();
+                }
+                let datadir = self.datadir.clone();
+                let network = self.cache.network;
+                let fingerprint_clone = fingerprint;
+                return Task::perform(
+                    async move {
+                        let result = create_coin_cube_watchonly_wallet(
+                            fingerprint_clone,
+                            &account_xpub,
+                            &datadir,
+                            network,
+                        )
+                        .await;
+                        (fingerprint_clone, result)
+                    },
+                    |(fg, res)| {
+                        Message::CoinCubeWalletCreated(fg, match res {
+                            Ok((_, name)) => Ok(name),
+                            Err(e) => Err(e),
+                        })
+                    },
+                );
+            }
+            Message::CoinCubeWalletCreated(fingerprint, res) => match res {
+                Ok(name) => {
+                    self.cache.known_coincube_fingerprints.insert(fingerprint);
+                    return self.update_dispatch(Message::View(view::Message::ShowSuccess(format!(
+                        "CoinCube watch-only wallet '{}' created",
+                        name
+                    ))));
+                }
+                Err(e) => {
+                    return self.update_dispatch(Message::View(view::Message::ShowError(format!(
+                        "Failed to create CoinCube wallet: {}",
+                        e
+                    ))));
+                }
+            },
             Message::InstallStats(_) => {
                 if let Some(panel) = self.panels.current_mut() {
                     return panel.update(self.daemon.clone(), &self.cache, message);

@@ -170,6 +170,7 @@ pub enum Message {
         email: String,
         cube_uuid: Option<String>,
     },
+    CoinCubeWalletCreated(Fingerprint, Result<String, String>),
 }
 
 #[derive(Debug)]

@@ -1,13 +1,18 @@
 use iced::Task;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
+    str::FromStr,
     sync::{Arc, Mutex},
 };
 
 use crate::{
-    app::{settings, wallet::Wallet},
+    app::{
+        settings::{self, WalletId, WalletSettings},
+        wallet::Wallet,
+    },
     coincube_hw::CoinCubeDevice,
     dir::CoincubeDirectory,
+    installer,
 };
 use async_hwi::{
     bitbox::{api::runtime, BitBox02, PairingBitbox02},
@@ -15,7 +20,18 @@ use async_hwi::{
     jade::{self, Jade},
     ledger, specter, DeviceKind, Error as HWIError, Version, HWI,
 };
-use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, hashes::hex::FromHex, Network};
+use coincube_core::{
+    descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
+    miniscript::{
+        bitcoin::{
+            bip32::Fingerprint,
+            hashes::hex::FromHex,
+            Network,
+        },
+        descriptor::DescriptorPublicKey,
+    },
+};
+use coincubed::config::{BitcoinBackend, BitcoinConfig, Config as DaemonConfig, EsploraConfig};
 use iced::futures::{SinkExt, Stream};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -154,6 +170,12 @@ pub enum HardwareWalletMessage {
     Error(String),
     List(ConnectedList),
     Unlocked(String, Result<HardwareWallet, async_hwi::Error>),
+    NewDeviceDetected {
+        fingerprint: Fingerprint,
+        account_xpub: String,
+        version: Version,
+        port: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +190,8 @@ pub struct HardwareWallets {
     pub aliases: HashMap<Fingerprint, String>,
     wallet: Option<Arc<Wallet>>,
     datadir_path: CoincubeDirectory,
+    known_coincube_fingerprints: HashSet<Fingerprint>,
+    pub pending_coincube_detected: Vec<(Fingerprint, String, Version, String)>,
 }
 
 impl std::fmt::Debug for HardwareWallets {
@@ -184,6 +208,8 @@ impl HardwareWallets {
             aliases: HashMap::new(),
             wallet: None,
             datadir_path,
+            known_coincube_fingerprints: HashSet::new(),
+            pending_coincube_detected: Vec::new(),
         }
     }
 
@@ -222,6 +248,16 @@ impl HardwareWallets {
     pub fn set_network(&mut self, network: Network) {
         self.network = network;
         self.list = Vec::new();
+    }
+
+    pub fn mark_coincube_fingerprint_known(&mut self, fingerprint: Fingerprint) {
+        self.known_coincube_fingerprints.insert(fingerprint);
+    }
+
+    pub fn drain_pending_coincube_detected(
+        &mut self,
+    ) -> Vec<(Fingerprint, String, Version, String)> {
+        std::mem::take(&mut self.pending_coincube_detected)
     }
 
     pub fn update(
@@ -295,6 +331,16 @@ impl HardwareWallets {
                     Ok(Task::batch(cmds))
                 }
             }
+            HardwareWalletMessage::NewDeviceDetected {
+                fingerprint,
+                account_xpub,
+                version,
+                port,
+            } => {
+                self.pending_coincube_detected
+                    .push((fingerprint, account_xpub, version, port));
+                Ok(Task::none())
+            }
             HardwareWalletMessage::Unlocked(id, res) => {
                 match res {
                     Err(e) => {
@@ -330,9 +376,116 @@ impl HardwareWallets {
             keys_aliases: self.aliases.clone(),
             wallet: self.wallet.clone(),
             datadir_path: self.datadir_path.clone(),
+            known_coincube_fingerprints: self.known_coincube_fingerprints.clone(),
         };
         iced::Subscription::run_with(state, make_refresh_stream)
     }
+}
+
+const DUMMY_RECOVERY_XPUB: &str =
+    "[abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*";
+
+pub async fn create_coin_cube_watchonly_wallet(
+    fingerprint: Fingerprint,
+    account_xpub: &str,
+    datadir_path: &CoincubeDirectory,
+    network: Network,
+) -> Result<(Fingerprint, String), String> {
+    let network_dir = datadir_path.network_directory(network);
+    if let Ok(s) = settings::Settings::from_file(&network_dir) {
+        let already_exists = s.wallets.iter().any(|w| {
+            w.keys.iter().any(|k| k.master_fingerprint == fingerprint)
+        });
+        if already_exists {
+            return Ok((fingerprint, "already exists".to_string()));
+        }
+    }
+
+    let coin_cube_key_str = format!(
+        "[{}]/84'/0'/0']{}/<0;1>/*",
+        fingerprint, account_xpub,
+    );
+    let coin_cube_key = DescriptorPublicKey::from_str(&coin_cube_key_str)
+        .map_err(|e| format!("Invalid CoinCube xpub: {}", e))?;
+    let dummy_key = DescriptorPublicKey::from_str(DUMMY_RECOVERY_XPUB)
+        .map_err(|e| format!("Invalid dummy xpub: {}", e))?;
+
+    let mut recovery_paths: BTreeMap<u16, PathInfo> = BTreeMap::new();
+    recovery_paths.insert(65535u16, PathInfo::Single(dummy_key));
+
+    let policy = CoincubePolicy::new(PathInfo::Single(coin_cube_key), recovery_paths)
+        .map_err(|e| format!("Failed to create descriptor policy: {}", e))?;
+    let descriptor = CoincubeDescriptor::new(policy);
+
+    let wallet_name = format!("CoinCube-{}", &fingerprint.to_string()[..8]);
+    let wallet_id = WalletId::generate(&descriptor);
+    let wallet_settings = WalletSettings {
+        name: wallet_name.clone(),
+        alias: Some(fingerprint.to_string()),
+        descriptor_checksum: wallet_id.descriptor_checksum.clone(),
+        pinned_at: wallet_id.timestamp,
+        keys: vec![settings::KeySetting {
+            name: "CoinCube".to_string(),
+            master_fingerprint: fingerprint,
+            provider_key: None,
+            is_border_wallet: false,
+        }],
+        hardware_wallets: vec![],
+        remote_backend_auth: None,
+        start_internal_bitcoind: None,
+    };
+
+    network_dir
+        .init()
+        .map_err(|e| format!("Failed to create network directory: {}", e))?;
+
+    let data_dir = network_dir.coincubed_data_directory(&wallet_id);
+    data_dir
+        .init()
+        .map_err(|e| format!("Failed to create data directory: {}", e))?;
+
+    let esplora_addr = match network {
+        Network::Bitcoin => "https://api.coincube.io/api/v1/esplora/bitcoin/mainnet",
+        Network::Testnet => "https://blockstream.info/testnet/api",
+        Network::Testnet4 => "https://blockstream.info/testnet4/api",
+        Network::Signet => "https://mutinynet.com/api",
+        Network::Regtest => "http://localhost:3000",
+    };
+
+    let daemon_config = DaemonConfig::new(
+        BitcoinConfig {
+            network,
+            poll_interval_secs: std::time::Duration::from_secs(30),
+        },
+        Some(BitcoinBackend::Esplora(EsploraConfig {
+            addr: esplora_addr.to_string(),
+            token: None,
+        })),
+        log::LevelFilter::Info,
+        descriptor,
+        data_dir,
+    );
+
+    let daemon_config_toml = toml::to_string_pretty(&daemon_config)
+        .map_err(|e| format!("Failed to serialize daemon config: {}", e))?;
+
+    installer::create_and_write_file(
+        &network_dir
+            .coincubed_data_directory(&wallet_settings.wallet_id())
+            .path()
+            .join("daemon.toml"),
+        daemon_config_toml.as_bytes(),
+    )
+    .map_err(|e| format!("Failed to write daemon config: {}", e))?;
+
+    settings::update_settings_file(&network_dir, |mut s| {
+        s.wallets.push(wallet_settings.clone());
+        Some(s)
+    })
+    .await
+    .map_err(|e| format!("Failed to update settings: {}", e))?;
+
+    Ok((fingerprint, wallet_name))
 }
 
 async fn unlock_bitbox(
@@ -388,6 +541,7 @@ struct RefreshState {
     keys_aliases: HashMap<Fingerprint, String>,
     wallet: Option<Arc<Wallet>>,
     datadir_path: CoincubeDirectory,
+    known_coincube_fingerprints: HashSet<Fingerprint>,
 }
 
 impl std::hash::Hash for RefreshState {
@@ -404,6 +558,7 @@ struct State {
     connected_supported_hws: Vec<String>,
     api: Option<ledger::HidApi>,
     datadir_path: CoincubeDirectory,
+    known_coincube_fingerprints: HashSet<Fingerprint>,
 }
 
 /// Function pointer for Subscription::run_with - creates the refresh stream from RefreshState
@@ -415,6 +570,7 @@ fn make_refresh_stream(rs: &RefreshState) -> impl Stream<Item = HardwareWalletMe
         connected_supported_hws: Vec::new(),
         api: None,
         datadir_path: rs.datadir_path.clone(),
+        known_coincube_fingerprints: rs.known_coincube_fingerprints.clone(),
     };
     refresh(state)
 }
@@ -559,15 +715,33 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                         .await
                         {
                             Ok(Ok(device)) => {
-                                match HardwareWallet::new(
-                                    id,
-                                    Arc::new(device),
-                                    Some(&state.keys_aliases),
-                                )
-                                .await
-                                {
-                                    Ok(hw) => hws.push(hw),
-                                    Err(e) => debug!("CoinCube HWI init failed: {}", e),
+                                let fingerprint = device.fingerprint();
+                                let known = state.keys_aliases.contains_key(&fingerprint)
+                                    || state.known_coincube_fingerprints.contains(&fingerprint)
+                                    || state.wallet.as_ref().map(|w| w.descriptor_keys().contains(&fingerprint)).unwrap_or(false);
+                                if known {
+                                    match HardwareWallet::new(
+                                        id,
+                                        Arc::new(device),
+                                        Some(&state.keys_aliases),
+                                    )
+                                    .await
+                                    {
+                                        Ok(hw) => hws.push(hw),
+                                        Err(e) => debug!("CoinCube HWI init failed: {}", e),
+                                    }
+                                } else {
+                                    let account_xpub = device.account_xpub().to_string();
+                                    let version = device.version().clone();
+                                    let _ = output
+                                        .send(HardwareWalletMessage::NewDeviceDetected {
+                                            fingerprint,
+                                            account_xpub,
+                                            version,
+                                            port: port.clone(),
+                                        })
+                                        .await;
+                                    still.push(id);
                                 }
                             }
                             Ok(Err(e)) => debug!("CoinCube connect failed: {}", e),

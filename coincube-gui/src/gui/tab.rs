@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::{HashMap, HashSet}, sync::Arc, time::Instant};
 
 use iced::{Subscription, Task};
 use tracing::{error, info};
@@ -1509,6 +1509,7 @@ pub fn create_app_with_remote_backend(
             connect_stream_status: crate::app::ConnectionStatus::default(),
             connect_device_id: None,
             connect_email: Some(remote_backend.user_email().to_string()),
+            known_coincube_fingerprints: HashSet::new(),
         },
         Arc::new(
             Wallet::new(wallet.descriptor)

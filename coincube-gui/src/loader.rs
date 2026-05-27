@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::From;
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Seek, SeekFrom};
@@ -638,6 +639,7 @@ pub async fn load_application(
         connect_stream_status: crate::app::ConnectionStatus::default(),
         connect_device_id: None,
         connect_email: None,
+        known_coincube_fingerprints: HashSet::new(),
     };
 
     Ok((

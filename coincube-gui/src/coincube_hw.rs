@@ -693,6 +693,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> CoinCubeDevice<T> {
     pub fn transport(&self) -> &Arc<GenericCoinCubeTransport<T>> {
         &self.transport
     }
+
+    pub fn account_xpub(&self) -> &Xpub {
+        &self.account_xpub
+    }
+
+    pub fn fingerprint(&self) -> Fingerprint {
+        self.fingerprint
+    }
+
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
 }
 
 impl CoinCubeDevice<SerialStream> {
