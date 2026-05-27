@@ -38,6 +38,10 @@ pub enum CubeSettingsOption {
     /// `feature_flags::CUBE_MEMBERS_UI_ENABLED`; sidebar entry is hidden
     /// otherwise. Same App-level dispatch as Avatar.
     Members,
+    /// CoinCube hardware wallet firmware management. Version check,
+    /// update availability, and upgrade instructions for the
+    /// connected CoinCube device.
+    CoinCube,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

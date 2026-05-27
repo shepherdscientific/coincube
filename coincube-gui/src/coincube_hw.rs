@@ -583,11 +583,21 @@ fn parse_ready(line: &str) -> Option<CoinCubeInfo> {
     }
     let fingerprint = Fingerprint::from([fg_bytes[0], fg_bytes[1], fg_bytes[2], fg_bytes[3]]);
 
-    // version: e.g. "1.0.0"
+    // version: e.g. "1.0.0" or "1.0.0-dev"
     let ver_parts: Vec<&str> = parts[1].splitn(3, '.').collect();
     let major = ver_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minor = ver_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let patch = ver_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (patch, prerelease) = if let Some(raw_patch) = ver_parts.get(2) {
+        if let Some(idx) = raw_patch.find('-') {
+            let p = raw_patch[..idx].parse().unwrap_or(0);
+            let pre = raw_patch[idx + 1..].to_string();
+            (p, if pre.is_empty() { None } else { Some(pre) })
+        } else {
+            (raw_patch.parse().unwrap_or(0), None)
+        }
+    } else {
+        (0, None)
+    };
 
     // xpub
     let account_xpub = Xpub::from_str(parts[2]).ok()?;
@@ -598,7 +608,7 @@ fn parse_ready(line: &str) -> Option<CoinCubeInfo> {
             major,
             minor,
             patch,
-            prerelease: None,
+            prerelease,
         },
         account_xpub,
     })

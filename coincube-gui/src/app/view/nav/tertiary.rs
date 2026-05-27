@@ -19,8 +19,9 @@ use crate::app::{
 };
 use coincube_ui::{
     icon::{
-        bitcoin_icon, chat_icon, coins_icon, graph_icon, home_icon, lightning_icon, person_icon,
-        plus_icon, receipt_icon, settings_icon, tooltip_icon, wallet_icon, wrench_icon,
+        bitcoin_icon, chat_icon, chip_icon, coins_icon, graph_icon, home_icon, lightning_icon,
+        person_icon, plus_icon, receipt_icon, settings_icon, tooltip_icon, wallet_icon,
+        wrench_icon,
     },
     theme,
     widget::{Column, Element},
@@ -126,6 +127,18 @@ fn cube_settings_items() -> Vec<SubItem> {
             },
         });
     }
+
+    items.push(SubItem {
+        label: "CoinCube",
+        icon: chip_icon,
+        route: Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::CoinCube)),
+        matches: |m| {
+            matches!(
+                m,
+                Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::CoinCube))
+            )
+        },
+    });
 
     items
 }

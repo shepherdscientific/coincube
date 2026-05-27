@@ -1,5 +1,6 @@
 pub mod about;
 pub mod backup;
+pub mod coin_cube_firmware;
 pub mod general;
 pub mod install_stats;
 pub mod recovery_kit;

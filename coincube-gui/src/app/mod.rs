@@ -1258,6 +1258,9 @@ impl App {
                     // App::view; no section message is dispatched to the
                     // SettingsState. Side-effect loads (avatar fetch,
                     // members fetch) are kicked below.
+                    menu::CubeSettingsOption::CoinCube => {
+                        Some(view::SettingsMessage::CoinCubeFirmwareSection)
+                    }
                     menu::CubeSettingsOption::Avatar | menu::CubeSettingsOption::Members => None,
                 };
                 if let Some(section_msg) = section_msg {

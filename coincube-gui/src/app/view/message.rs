@@ -336,6 +336,15 @@ pub enum SettingsMessage {
     /// Coexists with `BackupMasterSeed` above (the local paper-phrase
     /// backup), it does not replace it.
     RecoveryKit(RecoveryKitMessage),
+    /// CoinCube firmware management section (Cube → Settings → CoinCube).
+    CoinCubeFirmwareSection,
+    /// Fired when the CoinCube firmware panel navigates in; triggers a
+    /// device + network fetch to populate the panel.
+    CoinCubeFirmwareEnter,
+    /// Async result of CoinCube firmware version fetch from device + API.
+    CoinCubeFirmwareLoaded(
+        Result<crate::app::state::settings::coin_cube_firmware::CoinCubeFirmwareInfo, String>,
+    ),
 }
 
 #[derive(Debug, Clone)]

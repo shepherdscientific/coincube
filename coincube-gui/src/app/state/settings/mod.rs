@@ -1,4 +1,5 @@
 pub mod about;
+pub mod coin_cube_firmware;
 pub mod general;
 mod install_stats;
 pub mod recovery_kit;
@@ -10,6 +11,7 @@ use iced::Task;
 use coincube_ui::widget::Element;
 
 use about::AboutSettingsState;
+use coin_cube_firmware::CoinCubeFirmwareState;
 use general::GeneralSettingsState;
 use install_stats::InstallStatsState;
 
@@ -96,6 +98,15 @@ impl State for SettingsState {
             }
             Message::View(view::Message::Settings(view::SettingsMessage::InstallStatsSection)) => {
                 self.setting = Some(InstallStatsState::default().into());
+                self.setting
+                    .as_mut()
+                    .map(|s| s.reload(daemon, None))
+                    .unwrap_or_else(Task::none)
+            }
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::CoinCubeFirmwareSection,
+            )) => {
+                self.setting = Some(CoinCubeFirmwareState::default().into());
                 self.setting
                     .as_mut()
                     .map(|s| s.reload(daemon, None))
