@@ -54,30 +54,53 @@ fn loading_card<'a>() -> Element<'a, Message> {
     .into()
 }
 
+/// Returns true when the HWI error string indicates the device responded but
+/// has no wallet set up yet (GET_XPUB returned ERROR:1).
+fn is_wallet_not_initialized(error: &str) -> bool {
+    error.contains("no XPUB response") || error.contains("ERROR:1")
+}
+
 fn no_device_card<'a>(error: Option<&str>) -> Element<'a, Message> {
+    // Distinguish "nothing on USB" from "device found but wallet not set up".
+    let wallet_not_init = error.map(is_wallet_not_initialized).unwrap_or(false);
+
+    let (title, body) = if wallet_not_init {
+        (
+            "CoinCube Detected — Wallet Not Set Up",
+            "Your CoinCube is connected but has no wallet yet. \
+             Complete the setup on the device (New Wallet or Restore from Seed), \
+             then click Retry.",
+        )
+    } else {
+        (
+            "No CoinCube Connected",
+            "Connect your CoinCube hardware wallet via USB to manage firmware.",
+        )
+    };
+
     let mut col = Column::new()
         .spacing(10)
         .push(
             Row::new()
                 .push(badge::badge(icon::chip_icon()))
-                .push(text("No CoinCube Connected").bold())
+                .push(text(title).bold())
                 .padding(10)
                 .spacing(20)
                 .align_y(Alignment::Center)
                 .width(Length::Fill),
         )
         .push(separation().width(Length::Fill))
-        .push(
-            text("Connect your CoinCube hardware wallet via USB to manage firmware.")
-                .style(theme::text::secondary),
-        );
+        .push(text(body).style(theme::text::secondary));
 
+    // Show raw detail only for unexpected errors (not the wallet-not-init case).
     if let Some(e) = error {
-        col = col.push(
-            text(format!("Details: {}", e))
-                .size(12)
-                .style(theme::text::secondary),
-        );
+        if !wallet_not_init {
+            col = col.push(
+                text(format!("Details: {}", e))
+                    .size(12)
+                    .style(theme::text::secondary),
+            );
+        }
     }
 
     col = col.push(
