@@ -790,16 +790,41 @@ impl CoinCubeDevice<SerialStream> {
 
     /// Enumerate CoinCube-compatible serial port paths.
     ///
-    /// Lists every USB serial port visible to the OS, probes each one with a
-    /// fast handshake (see [`probe_port`]), and returns only those that respond
-    /// with a valid `READY` line.  There is no VID/PID or product‑string
-    /// filtering — the protocol handshake is the sole device validator.
+    /// Lists every candidate serial port visible to the OS, probes each one
+    /// with a fast handshake (see [`probe_port`]), and returns only those that
+    /// respond with a valid `READY` line.  The protocol handshake is the sole
+    /// device validator — no VID/PID or product-string filtering.
+    ///
+    /// ## Port-type filtering
+    ///
+    /// `tokio_serial` (via the `serialport` crate) classifies a port as
+    /// `UsbPort` only when the host OS/driver exposes full USB metadata.  The
+    /// ESP32-S3's built-in CDC/JTAG interface is a CDC ACM class device and
+    /// commonly appears as `SerialPortType::Unknown` on both macOS (IOKit) and
+    /// Linux (udev) because the CDC ACM class driver doesn't always fill in the
+    /// parent USB device info.  We therefore accept `Unknown` ports as well,
+    /// filtering only by name to exclude Bluetooth virtual serial ports (which
+    /// would each burn a full second on the probe timeout).
     pub async fn enumerate_ports() -> Result<Vec<String>, HWIError> {
         let ports = tokio_serial::available_ports().map_err(|e| HWIError::Device(e.to_string()))?;
 
         let usb_ports: Vec<String> = ports
             .into_iter()
-            .filter(|p| matches!(&p.port_type, tokio_serial::SerialPortType::UsbPort(_)))
+            .filter(|p| {
+                match &p.port_type {
+                    // Definitely a USB serial adapter — always include.
+                    tokio_serial::SerialPortType::UsbPort(_) => true,
+                    // Unknown type: common for ESP32-S3 CDC/ACM on macOS and
+                    // Linux.  Exclude Bluetooth-named ports to avoid slow
+                    // probe timeouts on Bluetooth virtual serial devices.
+                    tokio_serial::SerialPortType::Unknown => {
+                        let n = p.port_name.to_ascii_lowercase();
+                        !n.contains("bluetooth") && !n.contains("bt-")
+                    }
+                    // PCI / native UART / everything else — skip.
+                    _ => false,
+                }
+            })
             .map(|p| p.port_name)
             .collect();
 
