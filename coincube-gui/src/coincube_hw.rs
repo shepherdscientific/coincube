@@ -43,18 +43,14 @@ pub use transport::{CoinCubeTransport, GenericCoinCubeTransport, TransportError}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// USB VID for Espressif CDC devices (ESP32-S3 default USB serial).
-pub const COINCUBE_USB_VID: u16 = 0x303A;
-/// USB PID for the CoinCube device.
-/// TODO: obtain dedicated PID via pid.codes or ESP32 USB descriptor.
-pub const COINCUBE_USB_PID: u16 = 0x4001;
-
 /// Timeout for PSBT signing — user may need time to review on device.
 const SIGN_TIMEOUT: Duration = Duration::from_secs(120);
 /// Timeout for info queries (fingerprint, xpub, address verify).
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for initial handshake / READY detection.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Timeout for port probing during enumeration — fast skip for non-CoinCube devices.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Timeout for device-initiated balance/history queries.
 const DEVICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Read timeout for the session background reader — effectively infinite
@@ -768,28 +764,53 @@ impl CoinCubeDevice<SerialStream> {
         })
     }
 
-    /// Enumerate candidate serial port paths for CoinCube devices.
+    /// Fast probe on a single serial port — opens the port, sends GET_INFO,
+    /// and checks for a READY response within PROBE_TIMEOUT (1 s).  Used by
+    /// [`enumerate_ports`] to quickly skip non-CoinCube USB serial devices.
+    pub async fn probe_port(port_path: &str) -> Result<(), HWIError> {
+        let transport =
+            CoinCubeTransport::open(port_path).map_err(|e| HWIError::Device(e.to_string()))?;
+
+        transport
+            .send("GET_INFO")
+            .await
+            .map_err(|_| HWIError::DeviceNotFound)?;
+
+        let line = transport
+            .recv_line(PROBE_TIMEOUT)
+            .await
+            .map_err(|_| HWIError::DeviceNotFound)?;
+
+        if line.starts_with("READY") {
+            Ok(())
+        } else {
+            Err(HWIError::Device("device did not respond with READY".to_string()))
+        }
+    }
+
+    /// Enumerate CoinCube-compatible serial port paths.
     ///
-    /// Filters by USB VID/PID where the OS provides it, then falls back
-    /// to port description substring matching.
-    pub fn enumerate_ports() -> Result<Vec<String>, HWIError> {
+    /// Lists every USB serial port visible to the OS, probes each one with a
+    /// fast handshake (see [`probe_port`]), and returns only those that respond
+    /// with a valid `READY` line.  There is no VID/PID or product‑string
+    /// filtering — the protocol handshake is the sole device validator.
+    pub async fn enumerate_ports() -> Result<Vec<String>, HWIError> {
         let ports = tokio_serial::available_ports().map_err(|e| HWIError::Device(e.to_string()))?;
 
-        let candidates: Vec<String> = ports
+        let usb_ports: Vec<String> = ports
             .into_iter()
-            .filter(|p| match &p.port_type {
-                tokio_serial::SerialPortType::UsbPort(info) => {
-                    (info.vid == COINCUBE_USB_VID && info.pid == COINCUBE_USB_PID)
-                        || info
-                            .product
-                            .as_deref()
-                            .map(|s| s.to_ascii_lowercase().contains("coincube"))
-                            .unwrap_or(false)
-                }
-                _ => false,
-            })
+            .filter(|p| matches!(&p.port_type, tokio_serial::SerialPortType::UsbPort(_)))
             .map(|p| p.port_name)
             .collect();
+
+        debug!("CoinCube: USB serial ports to probe: {:?}", usb_ports);
+
+        let mut candidates = Vec::new();
+        for port in usb_ports {
+            if Self::probe_port(&port).await.is_ok() {
+                candidates.push(port);
+            }
+        }
 
         debug!("CoinCube: candidate ports: {:?}", candidates);
         Ok(candidates)

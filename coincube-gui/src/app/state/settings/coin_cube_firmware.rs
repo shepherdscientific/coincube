@@ -172,7 +172,7 @@ impl From<CoinCubeFirmwareState> for Box<dyn State> {
 
 /// Query the locally connected CoinCube device to get its firmware version.
 async fn query_connected_device() -> Result<CoinCubeInfo, String> {
-    let ports = CoinCubeDevice::enumerate_ports().map_err(|e| format!("Port enumeration failed: {}", e))?;
+    let ports = CoinCubeDevice::enumerate_ports().await.map_err(|e| format!("Port enumeration failed: {}", e))?;
 
     if ports.is_empty() {
         return Err("No CoinCube device found. Connect your CoinCube via USB and try again.".to_string());

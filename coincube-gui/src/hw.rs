@@ -701,7 +701,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
         }
 
         // ── CoinCube hardware wallet (USB CDC serial) ─────────────────────
-        match CoinCubeDevice::enumerate_ports() {
+        match CoinCubeDevice::enumerate_ports().await {
             Ok(ports) => {
                 for port in ports {
                     let id = format!("coincube-{}", port);
