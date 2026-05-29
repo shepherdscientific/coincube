@@ -35,7 +35,7 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Mutex, oneshot, watch};
 use tokio_serial::SerialStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
 
 // ─── Re-exports for hw.rs integration ────────────────────────────────────────
 
@@ -806,9 +806,16 @@ impl CoinCubeDevice<SerialStream> {
     /// filtering only by name to exclude Bluetooth virtual serial ports (which
     /// would each burn a full second on the probe timeout).
     pub async fn enumerate_ports() -> Result<Vec<String>, HWIError> {
-        let ports = tokio_serial::available_ports().map_err(|e| HWIError::Device(e.to_string()))?;
+        let all_ports = tokio_serial::available_ports().map_err(|e| HWIError::Device(e.to_string()))?;
 
-        let usb_ports: Vec<String> = ports
+        // Log all visible ports at INFO so they appear without RUST_LOG=debug.
+        info!(
+            "CoinCube: all serial ports visible to OS ({} total): {:?}",
+            all_ports.len(),
+            all_ports.iter().map(|p| format!("{} ({:?})", p.port_name, p.port_type)).collect::<Vec<_>>()
+        );
+
+        let usb_ports: Vec<String> = all_ports
             .into_iter()
             .filter(|p| {
                 match &p.port_type {
@@ -828,17 +835,24 @@ impl CoinCubeDevice<SerialStream> {
             .map(|p| p.port_name)
             .collect();
 
-        debug!("CoinCube: USB serial ports to probe: {:?}", usb_ports);
+        info!("CoinCube: candidate ports to probe: {:?}", usb_ports);
 
-        let mut candidates = Vec::new();
+        let mut found = Vec::new();
         for port in usb_ports {
-            if Self::probe_port(&port).await.is_ok() {
-                candidates.push(port);
+            info!("CoinCube: probing {}", port);
+            match Self::probe_port(&port).await {
+                Ok(()) => {
+                    info!("CoinCube: device found on {}", port);
+                    found.push(port);
+                }
+                Err(e) => {
+                    info!("CoinCube: {} did not respond ({})", port, e);
+                }
             }
         }
 
-        debug!("CoinCube: candidate ports: {:?}", candidates);
-        Ok(candidates)
+        info!("CoinCube: enumeration complete — {} device(s) found", found.len());
+        Ok(found)
     }
 }
 
